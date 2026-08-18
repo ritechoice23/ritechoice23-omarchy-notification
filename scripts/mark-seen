@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
+STATE_DIR="$STATE_HOME/ritechoice23-omarchy-notification"
+
+mkdir -p "$STATE_DIR"
+
+date +%s%3N > "$STATE_DIR/last-seen"

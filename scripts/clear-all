@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
+STATE_DIR="$STATE_HOME/ritechoice23-omarchy-notification"
+
+mkdir -p \
+  "$STATE_DIR/history" \
+  "$STATE_DIR/images" \
+  "$STATE_DIR/dismissed"
+
+# Clear Omarchy's visible popups and its built-in history.
+omarchy-shell notifications dismissAll \
+  >/dev/null 2>&1 || true
+
+sleep 0.2
+
+omarchy-shell notifications clear \
+  >/dev/null 2>&1 || true
+
+# Clear RiteChoice23's independent archive.
+rm -f \
+  "$STATE_DIR/history/"*.json \
+  2>/dev/null || true
+
+rm -f \
+  "$STATE_DIR/images/"* \
+  2>/dev/null || true
+
+rm -f \
+  "$STATE_DIR/dismissed/"* \
+  2>/dev/null || true
+
+date +%s%3N \
+  > "$STATE_DIR/last-seen"

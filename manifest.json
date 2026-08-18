@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "ritechoice23.omarchy.notification",
+  "name": "RiteChoice23 Notification",
+  "version": "1.0.0",
+  "author": "RiteChoice23",
+  "description": "A clean notification center for the Omarchy top bar.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "RiteChoice23 Notification",
+    "description": "Recent notifications, unread badge, dismiss and clear actions",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

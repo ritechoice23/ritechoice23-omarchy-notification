@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+notify-send \
+  -a "RiteChoice23" \
+  "Welcome" \
+  "RiteChoice23 Notification is working."
+
+sleep 1
+
+notify-send \
+  -a "GitHub" \
+  "Pull request updated" \
+  "A reviewer left feedback on your pull request."
+
+sleep 1
+
+notify-send \
+  -a "WhatsApp" \
+  "Project Team" \
+  "Babs: The deployment is complete."
+
+sleep 1
+
+notify-send \
+  -a "Google Chrome" \
+  "RiteChoice23 Community" \
+  $'<a href="https://web.whatsapp.com/">web.whatsapp.com</a>\n\nTunde: This sample uses the same browser-notification shape as WhatsApp Web.'
