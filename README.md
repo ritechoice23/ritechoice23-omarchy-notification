@@ -1,74 +1,40 @@
-# RiteChoice23 Notification
+# Omarchy Notification
 
-A clean notification center for the Omarchy top bar.
+A fast, keyboard-driven notification center and history archive for the Omarchy top bar.
 
-RiteChoice23 Notification adds a bell icon to the right side of Omarchy's
-Quickshell bar. Clicking it opens a native Omarchy panel containing recent
-notifications in a clean, scrollable list.
+Omarchy Notification adds an unread-badged bell widget to Omarchy's Quickshell bar. Clicking or hotkeying it opens a native Omarchy panel displaying recent notifications in a clean, scrollable history with instant application focus, single-key dismissal, and full Omarchy v4 theme compliance.
+
+---
 
 ## Features
 
-- Native Omarchy bar widget
-- Bell icon with unread-count badge
-- Popup anchored to the Omarchy bar
-- Recent notifications in newest-first order
-- App icon or fallback initial
-- App/source name, title, body and relative time
-- Detects common browser notification sources such as WhatsApp Web
-- Removes noisy browser-origin lines such as `web.whatsapp.com`
-- Hover-to-dismiss individual entries
-- Clear-all action
-- Empty state
-- Automatically follows the current Omarchy theme, font and spacing
-- Keeps an independent archive of up to 200 recent notifications
-- Preserves file-backed notification icons/images in its own state directory
-- Does not replace or patch Omarchy's built-in notification daemon
+- **Native Omarchy v4 Bar Widget**: Built with Quickshell, `qs.Ui` components (`PanelHero`, `PanelSeparator`, `Button`, `BorderSurface`), and theme tokens (`Color`, `Style`).
+- **Full Keyboard Navigation**: Navigate with Vim keys (`j`/`k`) or arrows, switch panels with `Tab`, focus apps with `Enter`, and dismiss with `x`.
+- **Click-to-Focus**: Clicking or activating any notification immediately focuses its window in Hyprland (`hyprctl dispatch focuswindow`).
+- **Urgency Highlights**: Critical-priority notifications (`urgency == 2`) are outlined with `Color.urgent`.
+- **Smart Web Origin Filtering**: Automatically cleans noisy browser prefixes (e.g. `web.whatsapp.com`, `mail.google.com`) and resolves clean labels like "WhatsApp" or "Gmail".
+- **Independent History Archive**: Retains up to 200 recent notifications locally in `~/.local/state/` even after toasts dismiss.
+- **Configurable Settings**: Custom archive limits and badge visibility configurable via GUI or `omarchy bar set`.
+- **IPC & Hotkey Support**: Summon or toggle the panel from anywhere using `omarchy-shell` or Hyprland keybinds.
+- **Lightweight & Efficient**: Zero heavy subshell polling when open; pauses background checks and synchronizes on demand.
 
-## Requirements
+---
 
-- Omarchy with the Quickshell plugin system
-- `jq`
+## Installation
 
-## Install from GitHub
-
-After this folder has been published as a public GitHub repository:
+### From GitHub
 
 ```bash
 omarchy plugin add https://github.com/ritechoice23/ritechoice23-omarchy-notification.git --enable --yes
 ```
 
-Then place the bell before the standard battery/power widget:
+Place the bell before the standard power widget (or wherever you prefer on your bar):
 
 ```bash
-omarchy bar move ritechoice23.omarchy.notification --before omarchy.power
+omarchy bar put ritechoice23.omarchy.notification --before omarchy.power
 ```
 
-If `omarchy.power` is not on your bar:
-
-```bash
-omarchy bar move ritechoice23.omarchy.notification right
-```
-
-## Update
-
-```bash
-omarchy plugin update ritechoice23.omarchy.notification
-```
-
-## Remove
-
-```bash
-omarchy plugin remove ritechoice23.omarchy.notification
-```
-
-The plugin's saved notification archive is intentionally not removed with the
-plugin. To remove that too:
-
-```bash
-rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/ritechoice23-omarchy-notification"
-```
-
-## Local install before publishing
+### Local Development Install
 
 From this repository directory:
 
@@ -76,111 +42,131 @@ From this repository directory:
 bash install-local.sh
 ```
 
-## Demo notifications
+---
+
+## Usage
+
+### Mouse & Keyboard Controls
+
+| Input | Action |
+| :--- | :--- |
+| **Left Click (Bar Icon)** | Toggle notification panel |
+| **Left Click (Card)** | Focus originating application window in Hyprland |
+| **Left Click (`×` Button)** | Dismiss individual notification from archive |
+| `↓` or `j` | Move selection down |
+| `↑` or `k` | Move selection up |
+| `Enter` or `Space` | Focus selected notification's application window |
+| `x` | Dismiss selected notification |
+| `Escape` | Close panel |
+| `Tab` / `Shift + Tab` | Switch to adjacent bar panel (e.g. Audio, Power) |
+
+### Hyprland Hotkey
+
+Add a keybinding in `~/.config/hypr/bindings.lua`:
+
+```lua
+-- Toggle notification center
+o.bind("SUPER + N", "Notifications", "omarchy-shell shell toggle ritechoice23.omarchy.notification")
+```
+
+---
+
+## IPC Commands
+
+Control the notification center from scripts, keybinds, or the terminal:
 
 ```bash
-bash scripts/demo-notifications
+# Toggle panel visibility
+omarchy-shell shell toggle ritechoice23.omarchy.notification
+
+# Summon (open) panel
+omarchy-shell shell summon ritechoice23.omarchy.notification
+
+# Hide (close) panel
+omarchy-shell shell hide ritechoice23.omarchy.notification
 ```
 
-Then wait for the normal notification to appear and click the bell icon.
+---
 
-## Validate
+## Configuration
 
-Before publishing or releasing:
+Settings are declared via the Omarchy manifest schema and can be modified through the **Omarchy Bar Settings GUI** (`omarchy launch bar-settings`) or via the CLI:
+
+| Setting | Type | Default | Description |
+| :--- | :---: | :---: | :--- |
+| `historyLimit` | `integer` | `200` | Maximum number of notifications to keep in archive (10–500) |
+| `showBadge` | `boolean` | `true` | Show unread count badge on the bar icon |
+
+### Changing Settings via CLI
 
 ```bash
-omarchy plugin validate .
+# Set history archive limit to 100
+omarchy bar set ritechoice23.omarchy.notification historyLimit 100 --json
+
+# Hide the unread count badge on the bar
+omarchy bar set ritechoice23.omarchy.notification showBadge false --json
 ```
 
-The included data-layer test can also be run anywhere with Bash and `jq`:
+---
 
-```bash
-bash tests/test-data.sh
-```
+## How It Works
 
-## Publish to GitHub
-
-Create an empty public repository named:
-
-```text
-ritechoice23-omarchy-notification
-```
-
-Then run from this directory:
-
-```bash
-git init -b main
-git add .
-git commit -m "Initial release of RiteChoice23 Notification"
-git remote add origin https://github.com/ritechoice23/ritechoice23-omarchy-notification.git
-git push -u origin main
-```
-
-After that, anyone can install it with:
-
-```bash
-omarchy plugin add https://github.com/ritechoice23/ritechoice23-omarchy-notification.git --enable --yes
-omarchy bar move ritechoice23.omarchy.notification --before omarchy.power
-```
-
-## How it works
-
-Omarchy remains the Freedesktop notification daemon. RiteChoice23 Notification
-does not start a second notification daemon.
-
-The widget reads the JSON notification state Omarchy already writes under:
+Omarchy runs the system Freedesktop notification daemon and writes notifications to:
 
 ```text
 ~/.local/state/omarchy/notifications/
 ```
 
-It mirrors those records into:
+This plugin reads these records and maintains an archive under:
 
 ```text
 ~/.local/state/ritechoice23-omarchy-notification/
-├── history/
-├── images/
-├── dismissed/
-└── last-seen
+├── history/       # Mirrored notification JSON records
+├── images/        # Cached notification avatars and icons
+├── dismissed/     # List of dismissed notification IDs
+└── last-seen      # Timestamp tracking unread state
 ```
 
-This independent archive lets RiteChoice23 keep up to 200 recent entries even
-though Omarchy itself may retain a shorter built-in history.
+- When the panel opens, it synchronizes state and marks notifications as seen.
+- When closed, a low-frequency 15-second timer updates the unread badge without full UI re-renders.
 
-The widget polls while loaded on the bar, so notifications are archived even
-when the panel is closed.
+---
 
-## Repository layout
+## Testing & Validation
 
-```text
-ritechoice23-omarchy-notification/
-├── manifest.json
-├── Panel.qml
-├── scripts/
-│   ├── notification-data
-│   ├── mark-seen
-│   ├── dismiss-one
-│   ├── clear-all
-│   └── demo-notifications
-├── tests/
-│   ├── fixtures/
-│   │   └── whatsapp-web.json
-│   └── test-data.sh
-├── install-local.sh
-├── uninstall-local.sh
-├── CHANGELOG.md
-├── LICENSE
-└── README.md
+```bash
+# Validate manifest against Omarchy standard
+omarchy plugin validate .
+
+# Run data-layer and parser tests
+bash tests/test-data.sh
+
+# Generate test notifications
+bash scripts/demo-notifications
 ```
 
-## Security
+---
 
-Omarchy shell plugins run as unsandboxed code as your user. Review any plugin
-before installing it from GitHub.
+## Update
 
-This plugin only reads notification state, maintains its own local archive,
-and invokes Omarchy's notification-clear IPC when you use Clear All.
+```bash
+omarchy plugin update ritechoice23.omarchy.notification
+```
+
+---
+
+## Removal
+
+```bash
+# Disable and remove plugin
+omarchy plugin remove ritechoice23.omarchy.notification
+
+# (Optional) Delete saved notification history archive
+rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/ritechoice23-omarchy-notification"
+```
+
+---
 
 ## License
 
-MIT
+[MIT](LICENSE)
