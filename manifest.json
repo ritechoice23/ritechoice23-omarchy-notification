@@ -16,6 +16,28 @@
     "description": "Recent notifications, unread badge, dismiss and clear actions",
     "category": "System",
     "allowMultiple": false,
-    "defaultSection": "right"
+    "defaultSection": "right",
+    "defaults": {
+      "historyLimit": 200,
+      "showBadge": true
+    },
+    "schema": [
+      {
+        "key": "historyLimit",
+        "type": "integer",
+        "label": "Maximum notifications to keep",
+        "min": 10,
+        "max": 500,
+        "step": 10,
+        "defaultValue": 200,
+        "description": "How many notifications to retain in the archive before older entries are pruned."
+      },
+      {
+        "key": "showBadge",
+        "type": "boolean",
+        "label": "Show unread count badge on bar icon",
+        "defaultValue": true
+      }
+    ]
   }
 }

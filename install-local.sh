@@ -45,17 +45,12 @@ omarchy-shell shell rescanPlugins
 
 omarchy plugin enable "$PLUGIN_ID"
 
-# Put the bell immediately before the standard battery/power widget when it
-# exists. Fall back to the right section if that widget is not present.
-if ! omarchy bar move \
-  "$PLUGIN_ID" \
-  --before omarchy.power
-then
-  omarchy bar move \
-    "$PLUGIN_ID" \
-    right
-fi
+# Place the bell before the standard power widget when it exists. The put verb
+# is idempotent: it places the widget if not already on the bar, and leaves one
+# that is already there where it is.
+omarchy bar put "$PLUGIN_ID" --before omarchy.power
 
 echo
 echo "RiteChoice23 Notification is installed."
 echo "Click the bell icon on the right side of the Omarchy bar."
+
