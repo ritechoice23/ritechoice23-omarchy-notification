@@ -20,6 +20,7 @@ Panel {
   // -- State --
 
   property var notifications: []
+  onNotificationsChanged: computeGroups()
   property var groupedNotifications: []
   property var expandedGroups: ({})
   property int unreadCount: 0
