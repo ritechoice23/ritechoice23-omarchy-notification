@@ -20,6 +20,8 @@ Panel {
   // -- State --
 
   property var notifications: []
+  property var groupedNotifications: []
+  property var expandedGroups: ({})
   property int unreadCount: 0
   property int currentIndex: -1
 
@@ -44,6 +46,58 @@ Panel {
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
+
+  // -- Data Grouping Engine --
+
+  function computeGroups() {
+    var raw = root.notifications || []
+    if (raw.length === 0) {
+      root.groupedNotifications = []
+      return
+    }
+
+    var map = new Map()
+
+    for (var i = 0; i < raw.length; i++) {
+      var item = raw[i]
+      var appName = root.sourceName(item)
+
+      if (!map.has(appName)) {
+        map.set(appName, {
+          app: appName,
+          items: [],
+          latestTimestamp: Number(item.timestamp || 0),
+          hasUrgent: false
+        })
+      }
+
+      var g = map.get(appName)
+      g.items.push(item)
+
+      var ts = Number(item.timestamp || 0)
+      if (ts > g.latestTimestamp) g.latestTimestamp = ts
+      if (Number(item.urgency || 0) === 2) g.hasUrgent = true
+    }
+
+    var list = Array.from(map.values()).sort(function(a, b) {
+      return b.latestTimestamp - a.latestTimestamp
+    })
+
+    for (var j = 0; j < list.length; j++) {
+      var grp = list[j]
+      grp.isExpanded = Boolean(root.expandedGroups[grp.app])
+    }
+
+    root.groupedNotifications = list
+  }
+
+  function toggleGroup(appName) {
+    var cur = Boolean(root.expandedGroups[appName])
+    var next = Object.assign({}, root.expandedGroups)
+    next[appName] = !cur
+    root.expandedGroups = next
+    root.computeGroups()
+  }
 
   // -- Text sanitization --
 
@@ -72,7 +126,7 @@ Panel {
       if (!line) continue
 
       // Browser notifications often put the site origin on the first line.
-      // The panel already labels the source, so remove this visual noise.
+      // Remove this visual noise for cleaner display.
       if (
         line === "web.whatsapp.com" ||
         line === "mail.google.com" ||
@@ -178,6 +232,14 @@ Panel {
     dismissProc.running = true
   }
 
+  function dismissGroup(groupItems) {
+    if (!groupItems || groupItems.length === 0) return
+    for (var i = 0; i < groupItems.length; i++) {
+      var file = String(groupItems[i]._ritechoiceFile || "")
+      if (file) dismissOne(file)
+    }
+  }
+
   function focusApp(appName) {
     var app = String(appName || "").trim()
     if (!app || focusProc.running) return
@@ -190,18 +252,22 @@ Panel {
   }
 
   function dismissCurrent() {
-    if (currentIndex < 0 || currentIndex >= notifications.length) return
-    var entry = notifications[currentIndex]
-    var file = String(entry._ritechoiceFile || "")
-    if (file) dismissOne(file)
+    if (currentIndex < 0 || currentIndex >= groupedNotifications.length) return
+    var grp = groupedNotifications[currentIndex]
+    if (grp && grp.items && grp.items.length > 0) {
+      dismissGroup(grp.items)
+    }
   }
 
   function activateCurrent() {
-    if (currentIndex < 0 || currentIndex >= notifications.length) return
-    var entry = notifications[currentIndex]
-    var app = String(entry.app || "").trim()
-    if (app) focusApp(app)
-    root.close()
+    if (currentIndex < 0 || currentIndex >= groupedNotifications.length) return
+    var grp = groupedNotifications[currentIndex]
+    if (grp && grp.items && grp.items.length > 0) {
+      var entry = grp.items[0]
+      var app = String(entry.app || "").trim()
+      if (app) focusApp(app)
+      root.close()
+    }
   }
 
   // -- Lifecycle --
@@ -254,9 +320,10 @@ Panel {
           var parsed = JSON.parse(text)
           root.notifications = parsed.notifications || []
           root.unreadCount = Number(parsed.unread || 0)
+          root.computeGroups()
         } catch (error) {
           console.warn(
-            "RiteChoice23 Notification: failed to parse data:",
+            "Notification: failed to parse data:",
             error
           )
         }
@@ -285,6 +352,7 @@ Panel {
 
     onExited: {
       root.notifications = []
+      root.groupedNotifications = []
       root.unreadCount = 0
       root.refresh()
     }
@@ -313,8 +381,8 @@ Panel {
 
     tooltipText:
       root.unreadCount > 0
-        ? "RiteChoice23 Notification (" + root.unreadCount + " new)"
-        : "RiteChoice23 Notification"
+        ? "Notifications (" + root.unreadCount + " new)"
+        : "Notifications"
 
     onPressed: function(mouseButton) {
       if (mouseButton === Qt.LeftButton) root.toggle()
@@ -382,12 +450,26 @@ Panel {
       }
 
       onMoveRequested: function(dx, dy) {
-        if (root.notifications.length === 0) return
+        if (root.groupedNotifications.length === 0) return
+
+        if (dx > 0 && root.currentIndex >= 0 && root.currentIndex < root.groupedNotifications.length) {
+          var g = root.groupedNotifications[root.currentIndex]
+          if (g && g.items && g.items.length > 1 && !g.isExpanded) {
+            root.toggleGroup(g.app)
+            return
+          }
+        } else if (dx < 0 && root.currentIndex >= 0 && root.currentIndex < root.groupedNotifications.length) {
+          var gr = root.groupedNotifications[root.currentIndex]
+          if (gr && gr.isExpanded) {
+            root.toggleGroup(gr.app)
+            return
+          }
+        }
 
         var next = root.currentIndex + dy
         if (next < 0) next = 0
-        if (next >= root.notifications.length)
-          next = root.notifications.length - 1
+        if (next >= root.groupedNotifications.length)
+          next = root.groupedNotifications.length - 1
 
         root.currentIndex = next
       }
@@ -417,10 +499,15 @@ Panel {
             fontFamily: root.fontFamily
             title: "Notifications"
 
-            meta:
-              root.notifications.length === 1
-                ? "1 RECENT NOTIFICATION"
-                : root.notifications.length + " RECENT NOTIFICATIONS"
+            meta: {
+              var n = root.notifications.length
+              var g = root.groupedNotifications.length
+              if (n === 0) return "ALL CAUGHT UP"
+              if (n === 1) return "1 NOTIFICATION"
+              return g > 1
+                ? n + " NOTIFICATIONS  ·  " + g + " APPS"
+                : n + " NOTIFICATIONS"
+            }
 
             iconComponent: Component {
               Text {
@@ -491,224 +578,445 @@ Panel {
             }
           }
 
-          // -- Notification cards --
+          // -- Grouped Notification Cards --
 
           Column {
             visible: root.notifications.length > 0
             width: parent.width
-            spacing: Style.space(8)
+            spacing: Style.space(10)
 
             Repeater {
-              model: root.notifications
+              model: root.groupedNotifications
 
               BorderSurface {
-                id: card
+                id: groupCard
 
                 required property var modelData
                 required property int index
 
-                readonly property var notification: modelData
-
-                readonly property string iconSource:
-                  root.imageSource(notification)
-
-                readonly property string archiveFile:
-                  String(notification._ritechoiceFile || "")
-
-                readonly property bool isSelected:
-                  root.currentIndex === index
-
-                readonly property bool isUrgent:
-                  Number(notification.urgency || 0) === 2
+                readonly property var group: modelData
+                readonly property var topItem: (group.items && group.items.length > 0) ? group.items[0] : null
+                readonly property int itemCount: group.items ? group.items.length : 0
+                readonly property bool isExpanded: group.isExpanded || false
+                readonly property bool isSelected: root.currentIndex === index
+                readonly property bool hasUrgent: Boolean(group.hasUrgent)
 
                 width: parent.width
+                radius: Style.space(14)
 
-                implicitHeight:
-                  notificationRow.implicitHeight + Style.space(20)
-
-                radius: Style.cornerRadius
-
+                // Translucent surface styling with smooth transition
                 color: isSelected
                   ? Style.selectedFillFor(root.foreground, Color.accent)
-                  : cardHover.hovered
+                  : groupHover.hovered
                     ? Style.hoverFillFor(root.foreground, Color.accent)
-                    : Qt.rgba(root.foreground.r, root.foreground.g,
-                              root.foreground.b, 0.04)
+                    : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.04)
 
-                borderSpec: isUrgent
-                  ? Border.controlSpec(
-                      "selected", root.foreground, Color.urgent)
-                  : Border.controlSpec(
-                      "normal", root.foreground, Color.accent)
+                borderSpec: hasUrgent
+                  ? Border.controlSpec("selected", root.foreground, Color.urgent)
+                  : Border.controlSpec(isSelected ? "selected" : "normal", root.foreground, Color.accent)
 
-                HoverHandler { id: cardHover }
+                Behavior on color { ColorAnimation { duration: 150 } }
 
-                MouseArea {
-                  anchors.fill: parent
-                  cursorShape: Qt.PointingHandCursor
+                HoverHandler { id: groupHover }
 
-                  onClicked: {
-                    var app = card.notification.app || ""
-                    if (app) root.focusApp(app)
-                    root.close()
-                  }
+                implicitHeight: cardContentCol.implicitHeight + Style.space(20)
+
+                Behavior on implicitHeight {
+                  NumberAnimation { duration: 250; easing.type: Easing.OutCubic }
                 }
 
-                Row {
-                  id: notificationRow
+                Column {
+                  id: cardContentCol
 
                   anchors.left: parent.left
                   anchors.right: parent.right
                   anchors.top: parent.top
                   anchors.margins: Style.space(10)
-                  spacing: Style.space(10)
+                  spacing: Style.space(8)
 
-                  // App icon / initial avatar
-                  Rectangle {
-                    width: Style.space(40)
-                    height: width
-                    radius: Style.space(9)
+                  // ==========================================
+                  // 1. APP HEADER & STACK CONTROLS
+                  // ==========================================
+                  Row {
+                    width: parent.width
+                    spacing: Style.space(8)
 
-                    color: Qt.rgba(
-                      root.foreground.r, root.foreground.g,
-                      root.foreground.b, 0.09)
+                    // App Icon / Squircle Avatar
+                    Rectangle {
+                      width: Style.space(26)
+                      height: width
+                      radius: Style.space(7)
+                      color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.09)
+                      anchors.verticalCenter: parent.verticalCenter
 
-                    Image {
-                      anchors.fill: parent
-                      anchors.margins: Style.space(4)
+                      Image {
+                        anchors.fill: parent
+                        anchors.margins: Style.space(3)
+                        source: root.imageSource(groupCard.topItem)
+                        visible: source.toString().length > 0
+                        fillMode: Image.PreserveAspectFit
+                        asynchronous: true
+                        smooth: true
+                      }
 
-                      source: card.iconSource
-                      visible: card.iconSource.length > 0
-
-                      fillMode: Image.PreserveAspectFit
-                      asynchronous: true
-                      smooth: true
+                      Text {
+                        visible: !root.imageSource(groupCard.topItem)
+                        anchors.centerIn: parent
+                        text: root.initial(groupCard.topItem)
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.space(11)
+                        font.bold: true
+                      }
                     }
 
-                    Text {
-                      visible: card.iconSource.length === 0
-                      anchors.centerIn: parent
+                    // App Name & Timestamp Meta
+                    Column {
+                      width: parent.width - Style.space(26) - (stackBadge.visible ? stackBadge.width + Style.space(8) : 0) - (groupDismissBtn.visible ? groupDismissBtn.width + Style.space(8) : 0) - Style.space(16)
+                      anchors.verticalCenter: parent.verticalCenter
+                      spacing: Style.space(1)
 
-                      text: root.initial(card.notification)
-                      color: root.foreground
+                      Text {
+                        width: parent.width
+                        text: (groupCard.group.app || "Notification").toUpperCase() + "  ·  " + root.timeAgo(groupCard.group.latestTimestamp)
+                        color: root.dimForeground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.space(10)
+                        font.bold: true
+                        font.letterSpacing: 0.6
+                        elide: Text.ElideRight
+                      }
+                    }
 
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.title
-                      font.bold: true
+                    // Stack Pill (e.g. "2 more ⌄" / "Show less ⌃")
+                    Rectangle {
+                      id: stackBadge
+                      visible: groupCard.itemCount > 1
+                      anchors.verticalCenter: parent.verticalCenter
+
+                      width: stackLabel.implicitWidth + Style.space(14)
+                      height: Style.space(20)
+                      radius: height / 2
+
+                      color: stackMouse.containsMouse
+                        ? Style.hoverFillFor(root.foreground, Color.accent)
+                        : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, groupCard.isExpanded ? 0.12 : 0.07)
+
+                      border.width: 1
+                      border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.09)
+
+                      Text {
+                        id: stackLabel
+                        anchors.centerIn: parent
+                        text: groupCard.isExpanded
+                          ? "Less ⌃"
+                          : (groupCard.itemCount - 1) + " more ⌄"
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.space(9)
+                        font.bold: true
+                      }
+
+                      MouseArea {
+                        id: stackMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.toggleGroup(groupCard.group.app)
+                      }
+                    }
+
+                    // Group Dismiss Button (Circle Pill on Hover)
+                    Rectangle {
+                      id: groupDismissBtn
+                      visible: groupHover.hovered
+                      anchors.verticalCenter: parent.verticalCenter
+
+                      width: Style.space(20)
+                      height: width
+                      radius: width / 2
+
+                      color: groupDismissMouse.containsMouse
+                        ? Style.hoverFillFor(root.foreground, Color.accent)
+                        : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.08)
+
+                      border.width: 1
+                      border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.10)
+
+                      Text {
+                        anchors.centerIn: parent
+                        text: "×"
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.body
+                        anchors.verticalCenterOffset: -1
+                      }
+
+                      MouseArea {
+                        id: groupDismissMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.dismissGroup(groupCard.group.items)
+                      }
                     }
                   }
 
-                  // Content column
-                  Column {
-                    width:
-                      notificationRow.width -
-                      Style.space(40) -
-                      notificationRow.spacing
+                  // ==========================================
+                  // 2. PRIMARY NOTIFICATION (Top Item)
+                  // ==========================================
+                  Item {
+                    id: primaryItemContainer
+                    width: parent.width
+                    implicitHeight: primaryCol.implicitHeight
 
-                    spacing: Style.space(3)
-
-                    // Source + time + dismiss
-                    Row {
+                    Column {
+                      id: primaryCol
                       width: parent.width
-                      spacing: Style.space(6)
+                      spacing: Style.space(4)
 
                       Text {
-                        width:
-                          parent.width -
-                          dismissButton.width -
-                          parent.spacing
-
-                        text: {
-                          var time = root.timeAgo(
-                            card.notification.timestamp)
-                          var source = root.sourceName(
-                            card.notification)
-
-                          return time.length > 0
-                            ? source + "  ·  " + time
-                            : source
-                        }
-
-                        color: root.dimForeground
-
+                        width: parent.width
+                        visible: text.length > 0
+                        text: root.cleanText(groupCard.topItem ? groupCard.topItem.summary : "")
+                        color: root.foreground
                         font.family: root.fontFamily
-                        font.pixelSize: Style.font.caption
+                        font.pixelSize: Style.font.body
+                        font.bold: true
+                        wrapMode: Text.WordWrap
+                        maximumLineCount: 2
                         elide: Text.ElideRight
                       }
 
-                      Rectangle {
-                        id: dismissButton
+                      Text {
+                        width: parent.width
+                        visible: text.length > 0
+                        text: root.cleanText(groupCard.topItem ? groupCard.topItem.body : "")
+                        color: root.dimForeground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.body
+                        wrapMode: Text.WordWrap
+                        maximumLineCount: 3
+                        elide: Text.ElideRight
+                      }
 
-                        visible:
-                          cardHover.hovered &&
-                          card.archiveFile.length > 0
+                      // Action Pills (Open App / Dismiss)
+                      Row {
+                        visible: groupHover.hovered || groupCard.isSelected
+                        spacing: Style.space(6)
+                        topPadding: Style.space(4)
 
-                        width: Style.space(22)
-                        height: width
-                        radius: width / 2
+                        Rectangle {
+                          height: Style.space(22)
+                          width: openPillLabel.implicitWidth + Style.space(16)
+                          radius: height / 2
 
-                        color: dismissArea.containsMouse
-                          ? Style.hoverFillFor(
-                              root.foreground, Color.accent)
-                          : Qt.rgba(
-                              root.foreground.r, root.foreground.g,
-                              root.foreground.b, 0.07)
+                          color: openPillMouse.containsMouse
+                            ? Style.hoverFillFor(root.foreground, Color.accent)
+                            : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.09)
 
-                        Text {
-                          anchors.centerIn: parent
-                          text: "×"
-                          color: root.foreground
+                          border.width: 1
+                          border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.10)
 
-                          font.family: root.fontFamily
-                          font.pixelSize: Style.font.body
+                          Text {
+                            id: openPillLabel
+                            anchors.centerIn: parent
+                            text: "Open App"
+                            color: root.foreground
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.space(9)
+                            font.bold: true
+                          }
+
+                          MouseArea {
+                            id: openPillMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                              var app = groupCard.topItem ? groupCard.topItem.app : ""
+                              if (app) root.focusApp(app)
+                              root.close()
+                            }
+                          }
                         }
 
-                        MouseArea {
-                          id: dismissArea
-                          anchors.fill: parent
-                          hoverEnabled: true
-                          cursorShape: Qt.PointingHandCursor
-                          onClicked: root.dismissOne(
-                            card.archiveFile)
+                        Rectangle {
+                          height: Style.space(22)
+                          width: dismissPillLabel.implicitWidth + Style.space(16)
+                          radius: height / 2
+
+                          color: dismissPillMouse.containsMouse
+                            ? Style.hoverFillFor(root.foreground, Color.accent)
+                            : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06)
+
+                          border.width: 1
+                          border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.08)
+
+                          Text {
+                            id: dismissPillLabel
+                            anchors.centerIn: parent
+                            text: "Dismiss"
+                            color: root.dimForeground
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.space(9)
+                          }
+
+                          MouseArea {
+                            id: dismissPillMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                              var file = String(groupCard.topItem ? groupCard.topItem._ritechoiceFile : "")
+                              if (file) root.dismissOne(file)
+                            }
+                          }
                         }
                       }
                     }
 
-                    // Summary
-                    Text {
-                      width: parent.width
-                      visible: text.length > 0
+                    MouseArea {
+                      anchors.fill: parent
+                      z: -1
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: {
+                        var app = groupCard.topItem ? groupCard.topItem.app : ""
+                        if (app) root.focusApp(app)
+                        root.close()
+                      }
+                    }
+                  }
 
-                      text: root.cleanText(
-                        card.notification.summary)
+                  // ==========================================
+                  // 3. COLLAPSIBLE ACCORDION BODY (Remaining Items)
+                  // ==========================================
+                  Item {
+                    id: accordionContainer
+                    width: parent.width
+                    clip: true
+                    visible: groupCard.itemCount > 1
 
-                      color: root.foreground
+                    implicitHeight: groupCard.isExpanded ? expandedCol.implicitHeight : 0
+                    opacity: groupCard.isExpanded ? 1.0 : 0.0
 
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.body
-                      font.bold: true
-
-                      wrapMode: Text.WordWrap
-                      maximumLineCount: 2
-                      elide: Text.ElideRight
+                    Behavior on implicitHeight {
+                      NumberAnimation { duration: 250; easing.type: Easing.OutCubic }
+                    }
+                    Behavior on opacity {
+                      NumberAnimation { duration: 200; easing.type: Easing.InOutQuad }
                     }
 
-                    // Body
-                    Text {
+                    Column {
+                      id: expandedCol
                       width: parent.width
-                      visible: text.length > 0
+                      spacing: Style.space(8)
+                      topPadding: Style.space(4)
 
-                      text: root.cleanText(
-                        card.notification.body)
+                      Repeater {
+                        model: (groupCard.group.items && groupCard.group.items.length > 1)
+                          ? groupCard.group.items.slice(1)
+                          : []
 
-                      color: root.dimForeground
+                        Column {
+                          id: subItemCol
+                          required property var modelData
+                          required property int index
 
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.body
+                          readonly property var subNotif: modelData
+                          readonly property string subFile: String(subNotif._ritechoiceFile || "")
 
-                      wrapMode: Text.WordWrap
-                      maximumLineCount: 4
-                      elide: Text.ElideRight
+                          width: parent.width
+                          spacing: Style.space(4)
+
+                          // Subtle divider between stacked notifications
+                          Rectangle {
+                            width: parent.width
+                            height: 1
+                            color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.08)
+                          }
+
+                          Row {
+                            width: parent.width
+                            spacing: Style.space(6)
+
+                            Text {
+                              width: parent.width - subDismissBtn.width - parent.spacing
+                              text: root.timeAgo(subItemCol.subNotif.timestamp)
+                              color: root.faintForeground
+                              font.family: root.fontFamily
+                              font.pixelSize: Style.font.caption
+                              elide: Text.ElideRight
+                            }
+
+                            Rectangle {
+                              id: subDismissBtn
+                              visible: subItemHover.hovered && subItemCol.subFile.length > 0
+                              width: Style.space(18)
+                              height: width
+                              radius: width / 2
+
+                              color: subDismissMouse.containsMouse
+                                ? Style.hoverFillFor(root.foreground, Color.accent)
+                                : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.08)
+
+                              Text {
+                                anchors.centerIn: parent
+                                text: "×"
+                                color: root.foreground
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.space(10)
+                              }
+
+                              MouseArea {
+                                id: subDismissMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.dismissOne(subItemCol.subFile)
+                              }
+                            }
+                          }
+
+                          Text {
+                            width: parent.width
+                            visible: text.length > 0
+                            text: root.cleanText(subItemCol.subNotif.summary)
+                            color: root.foreground
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.body
+                            font.bold: true
+                            wrapMode: Text.WordWrap
+                            maximumLineCount: 2
+                            elide: Text.ElideRight
+                          }
+
+                          Text {
+                            width: parent.width
+                            visible: text.length > 0
+                            text: root.cleanText(subItemCol.subNotif.body)
+                            color: root.dimForeground
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.body
+                            wrapMode: Text.WordWrap
+                            maximumLineCount: 3
+                            elide: Text.ElideRight
+                          }
+
+                          HoverHandler { id: subItemHover }
+
+                          MouseArea {
+                            anchors.fill: parent
+                            z: -1
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                              var app = subItemCol.subNotif.app || ""
+                              if (app) root.focusApp(app)
+                              root.close()
+                            }
+                          }
+                        }
+                      }
                     }
                   }
                 }
@@ -729,7 +1037,7 @@ Panel {
             width: parent.width
             horizontalAlignment: Text.AlignHCenter
 
-            text: "RiteChoice23 Notification"
+            text: "Omarchy Notification"
             color: root.faintForeground
 
             font.family: root.fontFamily
