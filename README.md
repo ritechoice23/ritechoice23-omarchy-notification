@@ -1,22 +1,23 @@
 # Omarchy Notification
 
-A fast, keyboard-driven notification center and history archive for the Omarchy top bar.
+A polished, keyboard-driven notification center and history archive for the Omarchy top bar.
 
-Omarchy Notification adds an unread-badged bell widget to Omarchy's Quickshell bar. Clicking or hotkeying it opens a native Omarchy panel displaying recent notifications in a clean, scrollable history with instant application focus, single-key dismissal, and full Omarchy v4 theme compliance.
+Omarchy Notification adds an unread-badged bell widget to Omarchy's Quickshell bar. Its chronological, macOS-inspired card list keeps every retained notification visible while following Omarchy's active palette, spacing, typography, control states, and window corner radius.
 
 ---
 
 ## Features
 
-- **Native Omarchy v4 Bar Widget**: Built with Quickshell, `qs.Ui` components (`PanelHero`, `PanelSeparator`, `Button`, `BorderSurface`), and theme tokens (`Color`, `Style`).
+- **Native Omarchy v4 Bar Widget**: Built with Quickshell and Omarchy's shared UI, notification color, control-state, spacing, and radius tokens.
+- **Chronological Cards**: Every retained notification is shown newest-first in Today, Yesterday, and older date sections—never hidden inside a collapsed app group.
 - **Full Keyboard Navigation**: Navigate with Vim keys (`j`/`k`) or arrows, switch panels with `Tab`, focus apps with `Enter`, and dismiss with `x`.
-- **Click-to-Focus**: Clicking or activating any notification immediately focuses its window in Hyprland (`hyprctl dispatch focuswindow`).
+- **Smart Click-to-Focus**: Runs preserved Omarchy actions first, otherwise resolves PWAs, desktop entries, and app classes before focusing the exact Hyprland window address.
 - **Urgency Highlights**: Critical-priority notifications (`urgency == 2`) are outlined with `Color.urgent`.
 - **Smart Web Origin Filtering**: Automatically cleans noisy browser prefixes (e.g. `web.whatsapp.com`, `mail.google.com`) and resolves clean labels like "WhatsApp" or "Gmail".
 - **Independent History Archive**: Retains up to 200 recent notifications locally in `~/.local/state/` even after toasts dismiss.
 - **Configurable Settings**: Custom archive limits and badge visibility configurable via GUI or `omarchy bar set`.
 - **IPC & Hotkey Support**: Summon or toggle the panel from anywhere using `omarchy-shell` or Hyprland keybinds.
-- **Lightweight & Efficient**: Zero heavy subshell polling when open; pauses background checks and synchronizes on demand.
+- **Responsive & Durable**: Watches Omarchy's notification state for immediate updates, falls back to low-frequency polling, and serializes archive work across monitors.
 
 ---
 
@@ -51,11 +52,11 @@ bash install-local.sh
 | Input | Action |
 | :--- | :--- |
 | **Left Click (Bar Icon)** | Toggle notification panel |
-| **Left Click (Card)** | Focus originating application window in Hyprland |
+| **Left Click (Card)** | Run its preserved action or focus the best matching Hyprland window, then dismiss it on success |
 | **Left Click (`×` Button)** | Dismiss individual notification from archive |
 | `↓` or `j` | Move selection down |
 | `↑` or `k` | Move selection up |
-| `Enter` or `Space` | Focus selected notification's application window |
+| `Enter` or `Space` | Activate the selected notification |
 | `x` | Dismiss selected notification |
 | `Escape` | Close panel |
 | `Tab` / `Shift + Tab` | Switch to adjacent bar panel (e.g. Audio, Power) |
@@ -127,8 +128,13 @@ This plugin reads these records and maintains an archive under:
 └── last-seen      # Timestamp tracking unread state
 ```
 
-- When the panel opens, it synchronizes state and marks notifications as seen.
-- When closed, a low-frequency 15-second timer updates the unread badge without full UI re-renders.
+- File events from Omarchy's notification directory are debounced into archive refreshes, with a 30-second polling fallback.
+- When the panel opens, it marks only the newest notification it successfully displayed as seen.
+- Archive writes, dismissals, pruning, clears, and seen watermarks are atomic and locked across per-monitor widget instances.
+
+### Activation limits
+
+Omarchy-specific notifications can preserve an `omarchy-exec` action, allowing the exact destination to reopen after archival. Standard Freedesktop default actions are live DBus callbacks and cannot be reconstructed after the sending application or notification-server generation is gone. For those historical entries, the plugin focuses the strongest matching existing app or web-app window and never launches an unavailable application.
 
 ---
 
@@ -138,8 +144,9 @@ This plugin reads these records and maintains an archive under:
 # Validate manifest against Omarchy standard
 omarchy plugin validate .
 
-# Run data-layer and parser tests
+# Run data and activation tests
 bash tests/test-data.sh
+bash tests/test-activation.sh
 
 # Generate test notifications
 bash scripts/demo-notifications

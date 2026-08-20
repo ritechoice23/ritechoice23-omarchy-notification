@@ -12,286 +12,295 @@ Panel {
   ipcTarget: "ritechoice23.omarchy.notification"
   manageIpc: false
 
-  // -- Settings (configurable via `omarchy bar set`) --
-
   readonly property int historyLimit: setting("historyLimit", 200)
   readonly property bool showBadge: setting("showBadge", true)
 
-  // -- State --
-
   property var notifications: []
-  onNotificationsChanged: computeGroups()
-  property var groupedNotifications: []
-  property var expandedGroups: ({})
   property int unreadCount: 0
   property int currentIndex: -1
-
-  // -- Centralized style properties --
+  property int timeRevision: 0
+  property bool refreshPending: false
+  property var dismissQueue: []
+  property var dismissActive: null
+  property var pendingDismissals: ({})
+  property var activationEntry: null
+  property string activationOutput: ""
+  property string statusMessage: ""
+  property int pendingSeenTimestamp: 0
+  property int seenInFlightTimestamp: 0
 
   readonly property string home: Quickshell.env("HOME")
-  readonly property string pluginDir:
-    home + "/.config/omarchy/plugins/ritechoice23.omarchy.notification"
+  readonly property string stateHome: {
+    var configured = Quickshell.env("XDG_STATE_HOME")
+    return configured ? configured : home + "/.local/state"
+  }
+  readonly property string omarchyNotificationDir: stateHome + "/omarchy/notifications"
+  readonly property string dataScript: localFile("scripts/notification-data")
+  readonly property string seenScript: localFile("scripts/mark-seen")
+  readonly property string clearScript: localFile("scripts/clear-all")
+  readonly property string dismissScript: localFile("scripts/dismiss-one")
+  readonly property string activateScript: localFile("scripts/activate-notification")
 
-  readonly property color foreground:
-    bar ? bar.foreground : Color.foreground
-  readonly property color background:
-    bar ? bar.background : Color.background
-  readonly property string fontFamily:
-    bar ? bar.fontFamily : Style.font.family
-  readonly property bool vertical:
-    bar ? bar.vertical : false
-  readonly property color dimForeground:
-    Qt.darker(foreground, 1.4)
-  readonly property color faintForeground:
-    Qt.darker(foreground, 2.0)
+  readonly property color foreground: Color.notifications.text
+  readonly property color background: bar ? bar.background : Color.background
+  readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
+  readonly property color dimForeground: Qt.darker(foreground, 1.35)
+  readonly property color faintForeground: Qt.darker(foreground, 1.85)
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
-  // -- Data Grouping Engine --
-
-  function computeGroups() {
-    var raw = root.notifications || []
-    if (raw.length === 0) {
-      root.groupedNotifications = []
-      return
-    }
-
-    var map = new Map()
-
-    for (var i = 0; i < raw.length; i++) {
-      var item = raw[i]
-      var appName = root.sourceName(item)
-
-      if (!map.has(appName)) {
-        map.set(appName, {
-          app: appName,
-          items: [],
-          latestTimestamp: Number(item.timestamp || 0),
-          hasUrgent: false
-        })
-      }
-
-      var g = map.get(appName)
-      g.items.push(item)
-
-      var ts = Number(item.timestamp || 0)
-      if (ts > g.latestTimestamp) g.latestTimestamp = ts
-      if (Number(item.urgency || 0) === 2) g.hasUrgent = true
-    }
-
-    var list = Array.from(map.values()).sort(function(a, b) {
-      return b.latestTimestamp - a.latestTimestamp
-    })
-
-    for (var j = 0; j < list.length; j++) {
-      var grp = list[j]
-      grp.isExpanded = Boolean(root.expandedGroups[grp.app])
-    }
-
-    root.groupedNotifications = list
+  function localFile(relativePath) {
+    var value = String(Qt.resolvedUrl(relativePath))
+    if (value.indexOf("file://") === 0) value = value.substring(7)
+    try { return decodeURIComponent(value) } catch (error) { return value }
   }
 
-  function toggleGroup(appName) {
-    var cur = Boolean(root.expandedGroups[appName])
-    var next = Object.assign({}, root.expandedGroups)
-    next[appName] = !cur
-    root.expandedGroups = next
-    root.computeGroups()
+  function validFileName(value) {
+    return /^[^/]+\.json$/.test(String(value || ""))
   }
-
-  // -- Text sanitization --
 
   function cleanText(value) {
     var text = String(value || "")
-
-    text = text.replace(/<br\s*\/?>/gi, "\n")
-    text = text.replace(/<a[^>]*>(.*?)<\/a>/gi, "$1")
-    text = text.replace(/<[^>]*>/g, " ")
-
-    text = text.replace(/&amp;/g, "&")
-    text = text.replace(/&lt;/g, "<")
-    text = text.replace(/&gt;/g, ">")
-    text = text.replace(/&quot;/g, "\"")
-    text = text.replace(/&#39;/g, "'")
-    text = text.replace(/&nbsp;/g, " ")
-
-    text = text.replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "")
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<a[^>]*>(.*?)<\/a>/gi, "$1")
+      .replace(/<[^>]*>/g, " ")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, "\"")
+      .replace(/&#39;/g, "'")
+      .replace(/&nbsp;/g, " ")
+      .replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "")
 
     var lines = text.split(/\r?\n/)
     var kept = []
-
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i].replace(/\s+/g, " ").trim()
-
       if (!line) continue
-
-      // Browser notifications often put the site origin on the first line.
-      // Remove this visual noise for cleaner display.
-      if (
-        line === "web.whatsapp.com" ||
-        line === "mail.google.com" ||
-        line === "calendar.google.com" ||
-        line === "youtube.com"
-      ) continue
-
+      if (kept.length === 0 && /^(?:https?:\/\/)?(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+\/?$/i.test(line)) continue
       kept.push(line)
     }
-
     return kept.join("\n").trim()
+  }
+
+  function webOrigin(entry) {
+    var body = String(entry && entry.body || "").toLowerCase()
+    var match = body.match(/https?:\/\/([^/\"'< >]+)/i)
+    return match ? match[1] : ""
   }
 
   function sourceName(entry) {
     if (!entry) return "Notification"
-
-    var body = String(entry.body || "").toLowerCase()
-
-    if (body.indexOf("web.whatsapp.com") >= 0) return "WhatsApp"
-    if (body.indexOf("mail.google.com") >= 0) return "Gmail"
-    if (body.indexOf("calendar.google.com") >= 0) return "Google Calendar"
-    if (body.indexOf("youtube.com") >= 0) return "YouTube"
-
+    var origin = webOrigin(entry)
+    if (origin.indexOf("web.whatsapp.com") >= 0) return "WhatsApp"
+    if (origin.indexOf("mail.google.com") >= 0) return "Gmail"
+    if (origin.indexOf("calendar.google.com") >= 0) return "Google Calendar"
+    if (origin.indexOf("youtube.com") >= 0) return "YouTube"
     var name = String(entry.app || "").trim()
-    return name.length > 0 ? name : "Notification"
+    return name || "Notification"
   }
 
   function initial(entry) {
     var name = sourceName(entry)
-    return name.length > 0 ? name.charAt(0).toUpperCase() : "N"
+    return name ? name.charAt(0).toUpperCase() : "N"
   }
 
-  function imageSource(entry) {
+  function usableImage(value) {
+    var source = String(value || "")
+    if (!source) return ""
+    if (source.indexOf("file://") === 0 || source.indexOf("image://") === 0 || source.charAt(0) === "/") return source
+    return Quickshell.iconPath(source, true)
+  }
+
+  function iconSource(entry) {
     if (!entry) return ""
+    return usableImage(entry.appIcon) || usableImage(entry.image)
+  }
 
-    var candidates = [
-      String(entry.image || ""),
-      String(entry.appIcon || "")
-    ]
+  function previewSource(entry) {
+    if (!entry) return ""
+    var image = usableImage(entry.image)
+    return image && image !== usableImage(entry.appIcon) ? image : ""
+  }
 
-    for (var i = 0; i < candidates.length; i++) {
-      var source = candidates[i]
-
-      if (
-        source.indexOf("file://") === 0 ||
-        source.indexOf("/") === 0 ||
-        source.indexOf("image://") === 0
-      ) {
-        return source
-      }
-    }
-
-    return ""
+  function numericTimestamp(value) {
+    var timestamp = Number(value || 0)
+    return isFinite(timestamp) && timestamp > 0 ? timestamp : 0
   }
 
   function timeAgo(timestamp) {
-    var value = Number(timestamp || 0)
-
-    if (!isFinite(value) || value <= 0) return ""
-
-    var seconds = Math.max(
-      0,
-      Math.floor((Date.now() - value) / 1000)
-    )
-
-    if (seconds < 60) return "now"
-
+    var revision = root.timeRevision
+    var value = numericTimestamp(timestamp)
+    if (!value) return "Unknown time"
+    var seconds = Math.max(0, Math.floor((Date.now() - value) / 1000))
+    if (seconds < 60) return "Now"
     var minutes = Math.floor(seconds / 60)
     if (minutes < 60) return minutes + "m ago"
-
     var hours = Math.floor(minutes / 60)
     if (hours < 24) return hours + "h ago"
-
     var days = Math.floor(hours / 24)
     if (days < 7) return days + "d ago"
-
-    return Qt.formatDate(new Date(value), "dd MMM")
+    return Qt.formatDate(new Date(value), "d MMM")
   }
 
-  // -- Actions --
+  function dayKey(timestamp) {
+    var value = numericTimestamp(timestamp)
+    if (!value) return "unknown"
+    return Qt.formatDate(new Date(value), "yyyy-MM-dd")
+  }
+
+  function dayLabel(timestamp) {
+    var value = numericTimestamp(timestamp)
+    if (!value) return "Earlier"
+    var date = new Date(value)
+    var today = new Date()
+    var yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1)
+    if (Qt.formatDate(date, "yyyy-MM-dd") === Qt.formatDate(today, "yyyy-MM-dd")) return "Today"
+    if (Qt.formatDate(date, "yyyy-MM-dd") === Qt.formatDate(yesterday, "yyyy-MM-dd")) return "Yesterday"
+    return Qt.formatDate(date, "dddd, d MMMM")
+  }
 
   function refresh() {
-    if (!dataProc.running) dataProc.running = true
+    if (dataProc.running) {
+      refreshPending = true
+      return
+    }
+    dataProc.running = true
   }
 
-  function markSeen() {
-    if (!seenProc.running) seenProc.running = true
+  function queueSeen(timestamp) {
+    var value = numericTimestamp(timestamp)
+    if (!value) return
+    pendingSeenTimestamp = Math.max(pendingSeenTimestamp, value)
+    unreadCount = 0
+    runSeen()
+  }
+
+  function runSeen() {
+    if (seenProc.running || pendingSeenTimestamp <= 0) return
+    seenInFlightTimestamp = pendingSeenTimestamp
+    pendingSeenTimestamp = 0
+    seenProc.command = ["/bin/bash", seenScript, String(seenInFlightTimestamp)]
+    seenProc.running = true
   }
 
   function clearAll() {
-    if (!clearProc.running) clearProc.running = true
+    if (clearProc.running) return
+    notifications = []
+    unreadCount = 0
+    currentIndex = -1
+    statusMessage = "Clearing notifications…"
+    clearProc.running = true
+  }
+
+  function removeLocal(fileName) {
+    var next = []
+    for (var i = 0; i < notifications.length; i++) {
+      if (String(notifications[i]._ritechoiceFile || "") !== fileName) next.push(notifications[i])
+    }
+    notifications = next
+    if (currentIndex >= next.length) currentIndex = next.length - 1
   }
 
   function dismissOne(fileName) {
-    var value = String(fileName || "")
-    if (!value || dismissProc.running) return
+    var file = String(fileName || "")
+    if (!validFileName(file) || pendingDismissals[file]) return
+    var pending = Object.assign({}, pendingDismissals)
+    pending[file] = true
+    pendingDismissals = pending
+    dismissQueue = dismissQueue.concat([file])
+    removeLocal(file)
+    runNextDismissal()
+  }
 
-    dismissProc.command = [
-      "/bin/bash",
-      root.pluginDir + "/scripts/dismiss-one",
-      value
-    ]
+  function runNextDismissal() {
+    if (dismissProc.running || dismissQueue.length === 0) return
+    dismissActive = dismissQueue[0]
+    dismissQueue = dismissQueue.slice(1)
+    dismissProc.command = ["/bin/bash", dismissScript, dismissActive]
     dismissProc.running = true
   }
 
-  function dismissGroup(groupItems) {
-    if (!groupItems || groupItems.length === 0) return
-    for (var i = 0; i < groupItems.length; i++) {
-      var file = String(groupItems[i]._ritechoiceFile || "")
-      if (file) dismissOne(file)
-    }
-  }
-
-  function focusApp(appName) {
-    var app = String(appName || "").trim()
-    if (!app || focusProc.running) return
-
-    focusProc.command = [
-      "hyprctl", "dispatch", "focuswindow",
-      "class:" + app.toLowerCase()
-    ]
-    focusProc.running = true
-  }
-
   function dismissCurrent() {
-    if (currentIndex < 0 || currentIndex >= groupedNotifications.length) return
-    var grp = groupedNotifications[currentIndex]
-    if (grp && grp.items && grp.items.length > 0) {
-      dismissGroup(grp.items)
-    }
+    if (currentIndex < 0 || currentIndex >= notifications.length) return
+    dismissOne(notifications[currentIndex]._ritechoiceFile)
+  }
+
+  function activateOne(entry) {
+    if (!entry || activateProc.running) return
+    var file = String(entry._ritechoiceFile || "")
+    if (!validFileName(file)) return
+    activationEntry = entry
+    activationOutput = ""
+    statusMessage = "Opening " + sourceName(entry) + "…"
+    activateProc.command = ["/bin/bash", activateScript, file]
+    activateProc.running = true
   }
 
   function activateCurrent() {
-    if (currentIndex < 0 || currentIndex >= groupedNotifications.length) return
-    var grp = groupedNotifications[currentIndex]
-    if (grp && grp.items && grp.items.length > 0) {
-      var entry = grp.items[0]
-      var app = String(entry.app || "").trim()
-      if (app) focusApp(app)
-      root.close()
-    }
+    if (currentIndex < 0 || currentIndex >= notifications.length) return
+    activateOne(notifications[currentIndex])
   }
 
-  // -- Lifecycle --
+  function setCurrentIndex(index) {
+    if (notifications.length === 0) {
+      currentIndex = -1
+      return
+    }
+    currentIndex = Math.max(0, Math.min(notifications.length - 1, index))
+    Qt.callLater(function() {
+      if (currentIndex >= 0) notificationList.positionViewAtIndex(currentIndex, ListView.Contain)
+    })
+  }
 
-  Component.onCompleted: refresh()
+  Component.onCompleted: {
+    refresh()
+    notificationWatcher.running = true
+  }
 
   onOpenedChanged: {
     if (opened) {
-      refresh()
-      markSeen()
+      statusMessage = ""
       currentIndex = -1
+      refresh()
     }
   }
 
-  // Badge polling — lightweight, only when panel is closed.
   Timer {
-    interval: 15000
-    running: !root.opened
+    interval: 60000
+    running: true
+    repeat: true
+    onTriggered: root.timeRevision++
+  }
+
+  Timer {
+    interval: 30000
+    running: true
     repeat: true
     onTriggered: root.refresh()
   }
 
-  // -- IPC Handler --
+  Timer {
+    id: refreshDebounce
+    interval: 120
+    repeat: false
+    onTriggered: root.refresh()
+  }
+
+  Timer {
+    id: watcherRestart
+    interval: 1500
+    repeat: false
+    onTriggered: if (!notificationWatcher.running) notificationWatcher.running = true
+  }
+
+  Timer {
+    id: statusTimer
+    interval: 2600
+    repeat: false
+    onTriggered: root.statusMessage = ""
+  }
 
   IpcHandler {
     target: "ritechoice23.omarchy.notification"
@@ -302,102 +311,128 @@ Panel {
     function unread(): int { return root.unreadCount }
   }
 
-  // -- Processes --
+  Process {
+    id: notificationWatcher
+    command: ["inotifywait", "-m", "-r", "-q", "-e", "close_write,create,delete,move", "--format", "%e", root.omarchyNotificationDir]
+    stdout: SplitParser { onRead: refreshDebounce.restart() }
+    onExited: watcherRestart.restart()
+  }
 
   Process {
     id: dataProc
-
-    command: [
-      "/bin/bash",
-      root.pluginDir + "/scripts/notification-data",
-      String(root.historyLimit)
-    ]
-
+    command: ["/bin/bash", root.dataScript, String(root.historyLimit)]
     stdout: StdioCollector {
       waitForEnd: true
-
       onStreamFinished: {
         try {
+          var selectedFile = root.currentIndex >= 0 && root.currentIndex < root.notifications.length
+            ? String(root.notifications[root.currentIndex]._ritechoiceFile || "") : ""
           var parsed = JSON.parse(text)
-          root.notifications = parsed.notifications || []
-          root.unreadCount = Number(parsed.unread || 0)
-          root.computeGroups()
+          var incoming = Array.isArray(parsed.notifications) ? parsed.notifications : []
+          var visible = []
+          for (var itemIndex = 0; itemIndex < incoming.length; itemIndex++) {
+            var incomingFile = String(incoming[itemIndex]._ritechoiceFile || "")
+            if (!clearProc.running && !root.pendingDismissals[incomingFile]) visible.push(incoming[itemIndex])
+          }
+          root.notifications = visible
+          root.unreadCount = root.opened ? 0 : Math.max(0, Number(parsed.unread || 0))
+          if (selectedFile) {
+            root.currentIndex = -1
+            for (var selectedIndex = 0; selectedIndex < root.notifications.length; selectedIndex++) {
+              if (String(root.notifications[selectedIndex]._ritechoiceFile || "") === selectedFile) {
+                root.currentIndex = selectedIndex
+                break
+              }
+            }
+          }
+          if (root.opened) root.queueSeen(parsed.maxTimestamp)
         } catch (error) {
-          console.warn(
-            "Notification: failed to parse data:",
-            error
-          )
+          console.warn("Notification: failed to parse archive:", error)
+          root.statusMessage = "Unable to load notifications"
+          statusTimer.restart()
         }
+      }
+    }
+    onExited: {
+      if (root.refreshPending) {
+        root.refreshPending = false
+        Qt.callLater(root.refresh)
       }
     }
   }
 
   Process {
     id: seenProc
-
-    command: [
-      "/bin/bash",
-      root.pluginDir + "/scripts/mark-seen"
-    ]
-
-    onExited: root.unreadCount = 0
+    onExited: root.runSeen()
   }
 
   Process {
     id: clearProc
-
-    command: [
-      "/bin/bash",
-      root.pluginDir + "/scripts/clear-all"
-    ]
-
-    onExited: {
-      root.notifications = []
-      root.groupedNotifications = []
-      root.unreadCount = 0
+    command: ["/bin/bash", root.clearScript]
+    onExited: function(exitCode) {
+      root.statusMessage = exitCode === 0 ? "All notifications cleared" : "Unable to clear notifications"
+      statusTimer.restart()
       root.refresh()
     }
   }
 
   Process {
     id: dismissProc
-    onExited: root.refresh()
+    onExited: function(exitCode) {
+      var file = String(root.dismissActive || "")
+      var pending = Object.assign({}, root.pendingDismissals)
+      delete pending[file]
+      root.pendingDismissals = pending
+      root.dismissActive = null
+      if (exitCode !== 0) {
+        root.statusMessage = "Unable to dismiss notification"
+        statusTimer.restart()
+      }
+      root.refresh()
+      root.runNextDismissal()
+    }
   }
 
   Process {
-    id: focusProc
-    onExited: root.close()
+    id: activateProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.activationOutput = text
+    }
+    onExited: function(exitCode) {
+      Qt.callLater(function() {
+        var result = null
+        try { result = JSON.parse(root.activationOutput || "{}") } catch (error) {}
+        if (exitCode === 0 && result && result.ok && root.activationEntry) {
+          var file = String(root.activationEntry._ritechoiceFile || "")
+          root.activationEntry = null
+          root.statusMessage = ""
+          root.dismissOne(file)
+          root.close()
+        } else {
+          root.activationEntry = null
+          root.statusMessage = "App window unavailable"
+          statusTimer.restart()
+        }
+      })
+    }
   }
-
-  // -- Bar icon button --
 
   BarIconButton {
     id: button
-
     anchors.fill: parent
     bar: root.bar
-
     text: "\uf0f3"
     active: root.opened
-
-    tooltipText:
-      root.unreadCount > 0
-        ? "Notifications (" + root.unreadCount + " new)"
-        : "Notifications"
-
-    onPressed: function(mouseButton) {
-      if (mouseButton === Qt.LeftButton) root.toggle()
-    }
+    tooltipText: root.unreadCount > 0 ? "Notifications (" + root.unreadCount + " new)" : "Notifications"
+    onPressed: function(mouseButton) { if (mouseButton === Qt.LeftButton) root.toggle() }
 
     Rectangle {
       visible: root.showBadge && root.unreadCount > 0
-
       width: root.unreadCount > 9 ? Style.space(17) : Style.space(13)
       height: Style.space(13)
-      radius: height / 2
-
+      radius: Style.cornerRadius > 0 ? height / 2 : 0
       color: root.bar ? root.bar.urgent : Color.urgent
-
       anchors.right: parent.right
       anchors.top: parent.top
       anchors.rightMargin: Style.space(1)
@@ -405,10 +440,8 @@ Panel {
 
       Text {
         anchors.centerIn: parent
-
         text: root.unreadCount > 9 ? "9+" : String(root.unreadCount)
         color: root.background
-
         font.family: root.fontFamily
         font.pixelSize: Style.space(7)
         font.bold: true
@@ -416,634 +449,179 @@ Panel {
     }
   }
 
-  // -- Panel --
-
   KeyboardPanel {
     id: notificationPanel
-
     anchorItem: button
     owner: root
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-
-    contentWidth:
-      notificationPanel.fittedContentWidth(Style.space(430))
-
-    contentHeight:
-      notificationPanel.fittedContentHeight(
-        panelColumn.implicitHeight,
-        Style.space(590)
-      )
+    contentWidth: notificationPanel.fittedContentWidth(Style.space(430))
+    contentHeight: notificationPanel.fittedContentHeight(panelColumn.implicitHeight, Style.space(620))
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-
       onCloseRequested: root.close()
-
       onActivateRequested: root.activateCurrent()
-
       onDeleteRequested: root.dismissCurrent()
-
-      onTabRequested: function(direction) {
-        root.switchPanel(direction)
-      }
-
+      onTabRequested: function(direction) { root.switchPanel(direction) }
       onMoveRequested: function(dx, dy) {
-        if (root.groupedNotifications.length === 0) return
-
-        if (dx > 0 && root.currentIndex >= 0 && root.currentIndex < root.groupedNotifications.length) {
-          var g = root.groupedNotifications[root.currentIndex]
-          if (g && g.items && g.items.length > 1 && !g.isExpanded) {
-            root.toggleGroup(g.app)
-            return
-          }
-        } else if (dx < 0 && root.currentIndex >= 0 && root.currentIndex < root.groupedNotifications.length) {
-          var gr = root.groupedNotifications[root.currentIndex]
-          if (gr && gr.isExpanded) {
-            root.toggleGroup(gr.app)
-            return
-          }
-        }
-
-        var next = root.currentIndex + dy
-        if (next < 0) next = 0
-        if (next >= root.groupedNotifications.length)
-          next = root.groupedNotifications.length - 1
-
-        root.currentIndex = next
+        if (dy !== 0) root.setCurrentIndex((root.currentIndex < 0 ? (dy > 0 ? -1 : root.notifications.length) : root.currentIndex) + dy)
       }
 
-      Flickable {
-        id: flick
+      Column {
+        id: panelColumn
+        anchors.left: parent.left
+        anchors.right: parent.right
+        spacing: Style.space(10)
 
-        anchors.fill: parent
-        contentWidth: width
-        contentHeight: panelColumn.implicitHeight
-        clip: true
-        boundsBehavior: Flickable.StopAtBounds
-        flickableDirection: Flickable.VerticalFlick
-        interactive: contentHeight > height
+        PanelHero {
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          title: "Notifications"
+          meta: {
+            var count = root.notifications.length
+            if (count === 0) return "ALL CAUGHT UP"
+            return count === 1 ? "1 NOTIFICATION" : count + " NOTIFICATIONS"
+          }
 
-        ScrollBar.vertical: ScrollBar {
-          policy: ScrollBar.AsNeeded
+          iconComponent: Component {
+            Text {
+              text: "󰂚"
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.display
+            }
+          }
+
+          trailingControl: Component {
+            Button {
+              visible: root.notifications.length > 0
+              text: "Clear"
+              iconText: "󰎟"
+              bordered: true
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: root.clearAll()
+            }
+          }
         }
 
-        Column {
-          id: panelColumn
-          width: flick.width
-          spacing: Style.space(12)
+        PanelSeparator { foreground: root.foreground }
 
-          PanelHero {
-            foreground: root.foreground
-            fontFamily: root.fontFamily
-            title: "Notifications"
-
-            meta: {
-              var n = root.notifications.length
-              var g = root.groupedNotifications.length
-              if (n === 0) return "ALL CAUGHT UP"
-              if (n === 1) return "1 NOTIFICATION"
-              return g > 1
-                ? n + " NOTIFICATIONS  ·  " + g + " APPS"
-                : n + " NOTIFICATIONS"
-            }
-
-            iconComponent: Component {
-              Text {
-                text: "󰂚"
-                color: root.foreground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.display
-              }
-            }
-
-            trailingControl: Component {
-              Button {
-                visible: root.notifications.length > 0
-                text: "Clear"
-                iconText: "󰎟"
-                bordered: true
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                onClicked: root.clearAll()
-              }
-            }
-          }
-
-          PanelSeparator { foreground: root.foreground }
-
-          // -- Empty state --
-
-          Item {
-            visible: root.notifications.length === 0
-
-            width: parent.width
-            implicitHeight: Style.space(240)
-
-            Column {
-              anchors.centerIn: parent
-              spacing: Style.space(10)
-
-              Text {
-                anchors.horizontalCenter: parent.horizontalCenter
-
-                text: "\uf0f3"
-                color: root.faintForeground
-
-                font.family: root.fontFamily
-                font.pixelSize: Style.space(28)
-              }
-
-              Text {
-                anchors.horizontalCenter: parent.horizontalCenter
-
-                text: "No notifications"
-                color: root.dimForeground
-
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.body
-                font.bold: true
-              }
-
-              Text {
-                anchors.horizontalCenter: parent.horizontalCenter
-
-                text: "New notifications will appear here."
-                color: root.faintForeground
-
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-              }
-            }
-          }
-
-          // -- Grouped Notification Cards --
+        Item {
+          width: parent.width
+          implicitHeight: root.notifications.length === 0
+            ? Style.space(240)
+            : Math.min(notificationList.contentHeight, Style.space(470))
 
           Column {
+            visible: root.notifications.length === 0
+            anchors.centerIn: parent
+            spacing: Style.space(9)
+
+            Text {
+              anchors.horizontalCenter: parent.horizontalCenter
+              text: "\uf0f3"
+              color: root.faintForeground
+              font.family: root.fontFamily
+              font.pixelSize: Style.space(30)
+            }
+            Text {
+              anchors.horizontalCenter: parent.horizontalCenter
+              text: "No notifications"
+              color: root.dimForeground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.title
+              font.bold: true
+            }
+            Text {
+              anchors.horizontalCenter: parent.horizontalCenter
+              text: "You’re all caught up."
+              color: root.faintForeground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+            }
+          }
+
+          ListView {
+            id: notificationList
             visible: root.notifications.length > 0
-            width: parent.width
-            spacing: Style.space(10)
+            anchors.fill: parent
+            model: root.notifications
+            currentIndex: root.currentIndex
+            spacing: Style.space(8)
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            reuseItems: true
+            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-            Repeater {
-              model: root.groupedNotifications
+            add: Transition { NumberAnimation { properties: "opacity,y"; duration: 170; easing.type: Easing.OutCubic } }
+            remove: Transition { NumberAnimation { properties: "opacity"; to: 0; duration: 120 } }
+            displaced: Transition { NumberAnimation { properties: "y"; duration: 160; easing.type: Easing.OutCubic } }
 
-              BorderSurface {
-                id: groupCard
+            delegate: Item {
+              id: delegateRoot
+              required property var modelData
+              required property int index
+              readonly property bool startsSection: index === 0 || root.dayKey(modelData.timestamp) !== root.dayKey(root.notifications[index - 1].timestamp)
+              width: ListView.view.width
+              height: delegateColumn.implicitHeight
 
-                required property var modelData
-                required property int index
-
-                readonly property var group: modelData
-                readonly property var topItem: (group.items && group.items.length > 0) ? group.items[0] : null
-                readonly property int itemCount: group.items ? group.items.length : 0
-                readonly property bool isExpanded: group.isExpanded || false
-                readonly property bool isSelected: root.currentIndex === index
-                readonly property bool hasUrgent: Boolean(group.hasUrgent)
-
+              Column {
+                id: delegateColumn
                 width: parent.width
-                radius: Style.space(14)
+                spacing: Style.space(6)
 
-                // Translucent surface styling with smooth transition
-                color: isSelected
-                  ? Style.selectedFillFor(root.foreground, Color.accent)
-                  : groupHover.hovered
-                    ? Style.hoverFillFor(root.foreground, Color.accent)
-                    : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.04)
+                Item {
+                  width: parent.width
+                  height: delegateRoot.startsSection ? Style.space(24) : 0
+                  visible: delegateRoot.startsSection
 
-                borderSpec: hasUrgent
-                  ? Border.controlSpec("selected", root.foreground, Color.urgent)
-                  : Border.controlSpec(isSelected ? "selected" : "normal", root.foreground, Color.accent)
-
-                Behavior on color { ColorAnimation { duration: 150 } }
-
-                HoverHandler { id: groupHover }
-
-                implicitHeight: cardContentCol.implicitHeight + Style.space(20)
-
-                Behavior on implicitHeight {
-                  NumberAnimation { duration: 250; easing.type: Easing.OutCubic }
+                  Text {
+                    anchors.left: parent.left
+                    anchors.bottom: parent.bottom
+                    anchors.leftMargin: Style.space(3)
+                    text: root.dayLabel(delegateRoot.modelData.timestamp)
+                    color: root.dimForeground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                  }
                 }
 
-                Column {
-                  id: cardContentCol
-
-                  anchors.left: parent.left
-                  anchors.right: parent.right
-                  anchors.top: parent.top
-                  anchors.margins: Style.space(10)
-                  spacing: Style.space(8)
-
-                  // ==========================================
-                  // 1. APP HEADER & STACK CONTROLS
-                  // ==========================================
-                  Row {
-                    width: parent.width
-                    spacing: Style.space(8)
-
-                    // App Icon / Squircle Avatar
-                    Rectangle {
-                      width: Style.space(26)
-                      height: width
-                      radius: Style.space(7)
-                      color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.09)
-                      anchors.verticalCenter: parent.verticalCenter
-
-                      Image {
-                        anchors.fill: parent
-                        anchors.margins: Style.space(3)
-                        source: root.imageSource(groupCard.topItem)
-                        visible: source.toString().length > 0
-                        fillMode: Image.PreserveAspectFit
-                        asynchronous: true
-                        smooth: true
-                      }
-
-                      Text {
-                        visible: !root.imageSource(groupCard.topItem)
-                        anchors.centerIn: parent
-                        text: root.initial(groupCard.topItem)
-                        color: root.foreground
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.space(11)
-                        font.bold: true
-                      }
-                    }
-
-                    // App Name & Timestamp Meta
-                    Column {
-                      width: parent.width - Style.space(26) - (stackBadge.visible ? stackBadge.width + Style.space(8) : 0) - (groupDismissBtn.visible ? groupDismissBtn.width + Style.space(8) : 0) - Style.space(16)
-                      anchors.verticalCenter: parent.verticalCenter
-                      spacing: Style.space(1)
-
-                      Text {
-                        width: parent.width
-                        text: (groupCard.group.app || "Notification").toUpperCase() + "  ·  " + root.timeAgo(groupCard.group.latestTimestamp)
-                        color: root.dimForeground
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.space(10)
-                        font.bold: true
-                        font.letterSpacing: 0.6
-                        elide: Text.ElideRight
-                      }
-                    }
-
-                    // Stack Pill (e.g. "2 more ⌄" / "Show less ⌃")
-                    Rectangle {
-                      id: stackBadge
-                      visible: groupCard.itemCount > 1
-                      anchors.verticalCenter: parent.verticalCenter
-
-                      width: stackLabel.implicitWidth + Style.space(14)
-                      height: Style.space(20)
-                      radius: height / 2
-
-                      color: stackMouse.containsMouse
-                        ? Style.hoverFillFor(root.foreground, Color.accent)
-                        : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, groupCard.isExpanded ? 0.12 : 0.07)
-
-                      border.width: 1
-                      border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.09)
-
-                      Text {
-                        id: stackLabel
-                        anchors.centerIn: parent
-                        text: groupCard.isExpanded
-                          ? "Less ⌃"
-                          : (groupCard.itemCount - 1) + " more ⌄"
-                        color: root.foreground
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.space(9)
-                        font.bold: true
-                      }
-
-                      MouseArea {
-                        id: stackMouse
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.toggleGroup(groupCard.group.app)
-                      }
-                    }
-
-                    // Group Dismiss Button (Circle Pill on Hover)
-                    Rectangle {
-                      id: groupDismissBtn
-                      visible: groupHover.hovered
-                      anchors.verticalCenter: parent.verticalCenter
-
-                      width: Style.space(20)
-                      height: width
-                      radius: width / 2
-
-                      color: groupDismissMouse.containsMouse
-                        ? Style.hoverFillFor(root.foreground, Color.accent)
-                        : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.08)
-
-                      border.width: 1
-                      border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.10)
-
-                      Text {
-                        anchors.centerIn: parent
-                        text: "×"
-                        color: root.foreground
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.font.body
-                        anchors.verticalCenterOffset: -1
-                      }
-
-                      MouseArea {
-                        id: groupDismissMouse
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.dismissGroup(groupCard.group.items)
-                      }
-                    }
-                  }
-
-                  // ==========================================
-                  // 2. PRIMARY NOTIFICATION (Top Item)
-                  // ==========================================
-                  Item {
-                    id: primaryItemContainer
-                    width: parent.width
-                    implicitHeight: primaryCol.implicitHeight
-
-                    Column {
-                      id: primaryCol
-                      width: parent.width
-                      spacing: Style.space(4)
-
-                      Text {
-                        width: parent.width
-                        visible: text.length > 0
-                        text: root.cleanText(groupCard.topItem ? groupCard.topItem.summary : "")
-                        color: root.foreground
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.font.body
-                        font.bold: true
-                        wrapMode: Text.WordWrap
-                        maximumLineCount: 2
-                        elide: Text.ElideRight
-                      }
-
-                      Text {
-                        width: parent.width
-                        visible: text.length > 0
-                        text: root.cleanText(groupCard.topItem ? groupCard.topItem.body : "")
-                        color: root.dimForeground
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.font.body
-                        wrapMode: Text.WordWrap
-                        maximumLineCount: 3
-                        elide: Text.ElideRight
-                      }
-
-                      // Action Pills (Open App / Dismiss)
-                      Row {
-                        visible: groupHover.hovered || groupCard.isSelected
-                        spacing: Style.space(6)
-                        topPadding: Style.space(4)
-
-                        Rectangle {
-                          height: Style.space(22)
-                          width: openPillLabel.implicitWidth + Style.space(16)
-                          radius: height / 2
-
-                          color: openPillMouse.containsMouse
-                            ? Style.hoverFillFor(root.foreground, Color.accent)
-                            : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.09)
-
-                          border.width: 1
-                          border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.10)
-
-                          Text {
-                            id: openPillLabel
-                            anchors.centerIn: parent
-                            text: "Open App"
-                            color: root.foreground
-                            font.family: root.fontFamily
-                            font.pixelSize: Style.space(9)
-                            font.bold: true
-                          }
-
-                          MouseArea {
-                            id: openPillMouse
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                              var app = groupCard.topItem ? groupCard.topItem.app : ""
-                              if (app) root.focusApp(app)
-                              root.close()
-                            }
-                          }
-                        }
-
-                        Rectangle {
-                          height: Style.space(22)
-                          width: dismissPillLabel.implicitWidth + Style.space(16)
-                          radius: height / 2
-
-                          color: dismissPillMouse.containsMouse
-                            ? Style.hoverFillFor(root.foreground, Color.accent)
-                            : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06)
-
-                          border.width: 1
-                          border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.08)
-
-                          Text {
-                            id: dismissPillLabel
-                            anchors.centerIn: parent
-                            text: "Dismiss"
-                            color: root.dimForeground
-                            font.family: root.fontFamily
-                            font.pixelSize: Style.space(9)
-                          }
-
-                          MouseArea {
-                            id: dismissPillMouse
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                              var file = String(groupCard.topItem ? groupCard.topItem._ritechoiceFile : "")
-                              if (file) root.dismissOne(file)
-                            }
-                          }
-                        }
-                      }
-                    }
-
-                    MouseArea {
-                      anchors.fill: parent
-                      z: -1
-                      cursorShape: Qt.PointingHandCursor
-                      onClicked: {
-                        var app = groupCard.topItem ? groupCard.topItem.app : ""
-                        if (app) root.focusApp(app)
-                        root.close()
-                      }
-                    }
-                  }
-
-                  // ==========================================
-                  // 3. COLLAPSIBLE ACCORDION BODY (Remaining Items)
-                  // ==========================================
-                  Item {
-                    id: accordionContainer
-                    width: parent.width
-                    clip: true
-                    visible: groupCard.itemCount > 1
-
-                    implicitHeight: groupCard.isExpanded ? expandedCol.implicitHeight : 0
-                    opacity: groupCard.isExpanded ? 1.0 : 0.0
-
-                    Behavior on implicitHeight {
-                      NumberAnimation { duration: 250; easing.type: Easing.OutCubic }
-                    }
-                    Behavior on opacity {
-                      NumberAnimation { duration: 200; easing.type: Easing.InOutQuad }
-                    }
-
-                    Column {
-                      id: expandedCol
-                      width: parent.width
-                      spacing: Style.space(8)
-                      topPadding: Style.space(4)
-
-                      Repeater {
-                        model: (groupCard.group.items && groupCard.group.items.length > 1)
-                          ? groupCard.group.items.slice(1)
-                          : []
-
-                        Column {
-                          id: subItemCol
-                          required property var modelData
-                          required property int index
-
-                          readonly property var subNotif: modelData
-                          readonly property string subFile: String(subNotif._ritechoiceFile || "")
-
-                          width: parent.width
-                          spacing: Style.space(4)
-
-                          // Subtle divider between stacked notifications
-                          Rectangle {
-                            width: parent.width
-                            height: 1
-                            color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.08)
-                          }
-
-                          Row {
-                            width: parent.width
-                            spacing: Style.space(6)
-
-                            Text {
-                              width: parent.width - subDismissBtn.width - parent.spacing
-                              text: root.timeAgo(subItemCol.subNotif.timestamp)
-                              color: root.faintForeground
-                              font.family: root.fontFamily
-                              font.pixelSize: Style.font.caption
-                              elide: Text.ElideRight
-                            }
-
-                            Rectangle {
-                              id: subDismissBtn
-                              visible: subItemHover.hovered && subItemCol.subFile.length > 0
-                              width: Style.space(18)
-                              height: width
-                              radius: width / 2
-
-                              color: subDismissMouse.containsMouse
-                                ? Style.hoverFillFor(root.foreground, Color.accent)
-                                : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.08)
-
-                              Text {
-                                anchors.centerIn: parent
-                                text: "×"
-                                color: root.foreground
-                                font.family: root.fontFamily
-                                font.pixelSize: Style.space(10)
-                              }
-
-                              MouseArea {
-                                id: subDismissMouse
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: root.dismissOne(subItemCol.subFile)
-                              }
-                            }
-                          }
-
-                          Text {
-                            width: parent.width
-                            visible: text.length > 0
-                            text: root.cleanText(subItemCol.subNotif.summary)
-                            color: root.foreground
-                            font.family: root.fontFamily
-                            font.pixelSize: Style.font.body
-                            font.bold: true
-                            wrapMode: Text.WordWrap
-                            maximumLineCount: 2
-                            elide: Text.ElideRight
-                          }
-
-                          Text {
-                            width: parent.width
-                            visible: text.length > 0
-                            text: root.cleanText(subItemCol.subNotif.body)
-                            color: root.dimForeground
-                            font.family: root.fontFamily
-                            font.pixelSize: Style.font.body
-                            wrapMode: Text.WordWrap
-                            maximumLineCount: 3
-                            elide: Text.ElideRight
-                          }
-
-                          HoverHandler { id: subItemHover }
-
-                          MouseArea {
-                            anchors.fill: parent
-                            z: -1
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                              var app = subItemCol.subNotif.app || ""
-                              if (app) root.focusApp(app)
-                              root.close()
-                            }
-                          }
-                        }
-                      }
-                    }
-                  }
+                NotificationCard {
+                  width: parent.width
+                  entry: delegateRoot.modelData
+                  selected: root.currentIndex === delegateRoot.index
+                  pending: root.activationEntry && String(root.activationEntry._ritechoiceFile || "") === String(entry._ritechoiceFile || "")
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  cleanText: root.cleanText
+                  sourceName: root.sourceName
+                  iconSource: root.iconSource
+                  previewSource: root.previewSource
+                  timeAgo: root.timeAgo
+                  initial: root.initial
+                  onActivateRequested: root.activateOne(entry)
+                  onDismissRequested: root.dismissOne(entry._ritechoiceFile)
                 }
               }
             }
           }
+        }
 
-          // -- Footer --
+        PanelSeparator { visible: root.notifications.length > 0 || root.statusMessage.length > 0; foreground: root.foreground }
 
-          PanelSeparator {
-            visible: root.notifications.length > 0
-            foreground: root.foreground
-          }
-
-          Text {
-            visible: root.notifications.length > 0
-
-            width: parent.width
-            horizontalAlignment: Text.AlignHCenter
-
-            text: "Omarchy Notification"
-            color: root.faintForeground
-
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-          }
+        Text {
+          visible: root.statusMessage.length > 0
+          width: parent.width
+          horizontalAlignment: Text.AlignHCenter
+          text: root.statusMessage
+          color: root.statusMessage.indexOf("unavailable") >= 0 || root.statusMessage.indexOf("Unable") >= 0 ? Color.urgent : root.faintForeground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
         }
       }
     }

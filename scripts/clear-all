@@ -3,33 +3,27 @@ set -euo pipefail
 
 STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
 STATE_DIR="$STATE_HOME/ritechoice23-omarchy-notification"
+OMARCHY_DIR="$STATE_HOME/omarchy/notifications"
+mkdir -p "$STATE_DIR/history" "$STATE_DIR/images" "$STATE_DIR/dismissed"
 
-mkdir -p \
-  "$STATE_DIR/history" \
-  "$STATE_DIR/images" \
-  "$STATE_DIR/dismissed"
+# Clear the source first; the state lock then makes the local clear win over
+# any synchronization that was already running on another bar instance.
+omarchy-shell notifications dismissAll >/dev/null 2>&1 || true
+omarchy-shell notifications clear >/dev/null 2>&1 || true
 
-# Clear Omarchy's visible popups and its built-in history.
-omarchy-shell notifications dismissAll \
-  >/dev/null 2>&1 || true
+exec 9>"$STATE_DIR/state.lock"
+flock 9
 
-sleep 0.2
+# If Omarchy's IPC was unavailable, prevent its still-present records from
+# being imported again on the next refresh.
+shopt -s nullglob
+for source in "$OMARCHY_DIR"/*.json "$OMARCHY_DIR/history"/*.json; do
+  : > "$STATE_DIR/dismissed/$(basename "$source")"
+done
 
-omarchy-shell notifications clear \
-  >/dev/null 2>&1 || true
+find "$STATE_DIR/history" -maxdepth 1 -type f -name '*.json' -delete
+find "$STATE_DIR/images" -maxdepth 1 -type f -delete
 
-# Clear RiteChoice23's independent archive.
-rm -f \
-  "$STATE_DIR/history/"*.json \
-  2>/dev/null || true
-
-rm -f \
-  "$STATE_DIR/images/"* \
-  2>/dev/null || true
-
-rm -f \
-  "$STATE_DIR/dismissed/"* \
-  2>/dev/null || true
-
-date +%s%3N \
-  > "$STATE_DIR/last-seen"
+temporary="$(mktemp "$STATE_DIR/.seen.XXXXXX")"
+printf '%s\n' "$(date +%s%3N)" > "$temporary"
+mv -f -- "$temporary" "$STATE_DIR/last-seen"

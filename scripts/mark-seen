@@ -1,9 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+watermark="${1:-$(date +%s%3N)}"
+[[ "$watermark" =~ ^[0-9]+$ ]] || exit 2
+
 STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
 STATE_DIR="$STATE_HOME/ritechoice23-omarchy-notification"
-
+LAST_SEEN_FILE="$STATE_DIR/last-seen"
 mkdir -p "$STATE_DIR"
+exec 9>"$STATE_DIR/state.lock"
+flock 9
 
-date +%s%3N > "$STATE_DIR/last-seen"
+current=0
+if [[ -r "$LAST_SEEN_FILE" ]]; then read -r current < "$LAST_SEEN_FILE" || true; fi
+[[ "$current" =~ ^[0-9]+$ ]] || current=0
+(( watermark > current )) || watermark="$current"
+
+temporary="$(mktemp "$STATE_DIR/.seen.XXXXXX")"
+printf '%s\n' "$watermark" > "$temporary"
+mv -f -- "$temporary" "$LAST_SEEN_FILE"

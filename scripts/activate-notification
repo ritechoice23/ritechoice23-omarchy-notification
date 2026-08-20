@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+file="${1:-}"
+[[ -n "$file" && "$file" == "$(basename "$file")" && "$file" == *.json ]] || {
+  jq -cn '{ ok: false, error: "invalid-notification" }'
+  exit 2
+}
+
+STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
+STATE_DIR="$STATE_HOME/ritechoice23-omarchy-notification"
+record="$STATE_DIR/history/$file"
+[[ -f "$record" ]] || {
+  jq -cn '{ ok: false, error: "notification-missing" }'
+  exit 1
+}
+
+exec 9>"$STATE_DIR/state.lock"
+flock -s 9
+
+json="$(head -n 1 "$record" 2>/dev/null || true)"
+jq -e 'type == "object"' >/dev/null 2>&1 <<<"$json" || {
+  jq -cn '{ ok: false, error: "notification-invalid" }'
+  exit 1
+}
+
+# The record is now in memory. Do not let a detached action inherit and hold
+# the state lock for the lifetime of the launched application.
+flock -u 9
+exec 9>&-
+
+action="$(jq -r '.exec // empty' <<<"$json")"
+if [[ -n "$action" ]]; then
+  # This is the same persisted omarchy-exec contract used by Omarchy's own
+  # notification service. Detach it so shell restarts do not kill the action.
+  if setsid --fork bash -lc "$action" >/dev/null 2>&1; then
+    jq -cn '{ ok: true, method: "action" }'
+    exit 0
+  fi
+fi
+
+app="$(jq -r '.app // empty' <<<"$json")"
+body="$(jq -r '.body // empty' <<<"$json")"
+origin="$(printf '%s\n' "$body" | sed -nE 's#.*https?://([^/"< >]+).*#\1#p' | head -n 1)"
+origin="${origin,,}"
+
+hyprctl_bin="${RITECHOICE_HYPRCTL_BIN:-hyprctl}"
+clients="$($hyprctl_bin -j clients 2>/dev/null || true)"
+jq -e 'type == "array"' >/dev/null 2>&1 <<<"$clients" || clients='[]'
+
+startup_class=""
+desktop_dirs="${RITECHOICE_DESKTOP_DIRS:-$HOME/.local/share/applications:/usr/local/share/applications:/usr/share/applications}"
+normalized_app="$(printf '%s' "$app" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]')"
+
+IFS=: read -r -a directories <<<"$desktop_dirs"
+for directory in "${directories[@]}"; do
+  [[ -d "$directory" ]] || continue
+  while IFS= read -r desktop_file; do
+    name="$(sed -n 's/^Name=//p' "$desktop_file" | head -n 1)"
+    class="$(sed -n 's/^StartupWMClass=//p' "$desktop_file" | head -n 1)"
+    desktop_id="$(basename "${desktop_file%.desktop}")"
+    normalized_name="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]')"
+    normalized_id="$(printf '%s' "$desktop_id" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]')"
+    if [[ -n "$normalized_app" && ( "$normalized_name" == "$normalized_app" || "$normalized_id" == "$normalized_app" ) ]]; then
+      startup_class="$class"
+      break 2
+    fi
+  done < <(find "$directory" -maxdepth 1 -type f -name '*.desktop' -print 2>/dev/null)
+done
+
+address="$(jq -r --arg app "$app" --arg origin "$origin" --arg startup "$startup_class" '
+  def norm: ascii_downcase | gsub("[^a-z0-9]"; "");
+  def lower: ascii_downcase;
+  def fields: [(.class // ""), (.initialClass // ""), (.title // ""), (.initialTitle // "")];
+  def score:
+    (fields | map(lower) | join("\n")) as $all
+    | (fields | map(norm) | join("\n")) as $normalized
+    | ($app | norm) as $appNorm
+    | ($origin | norm) as $originNorm
+    | ($startup | lower) as $startupLower
+    | if ($origin | length) > 0 and ($all | contains($origin | lower)) then 120
+      elif ($originNorm | length) > 3 and ($normalized | contains($originNorm)) then 110
+      elif ($startupLower | length) > 0 and ([.class, .initialClass] | map((. // "") | lower) | index($startupLower)) != null then 90
+      elif ($appNorm | length) > 2 and ([.class, .initialClass] | map((. // "") | norm) | index($appNorm)) != null then 80
+      elif ($appNorm | length) > 2 and ($normalized | contains($appNorm)) then 60
+      else 0 end;
+  [to_entries[] | .value as $client | { index: .key, address: ($client.address // ""), score: ($client | score) }]
+  | map(select(.address != "" and .score > 0))
+  | sort_by([-.score, .index])
+  | first.address // empty
+' <<<"$clients")"
+
+if [[ -z "$address" ]]; then
+  jq -cn '{ ok: false, error: "app-window-unavailable" }'
+  exit 1
+fi
+
+if "$hyprctl_bin" dispatch "hl.dsp.focus({ window = \"address:$address\" })" >/dev/null 2>&1 ||
+   "$hyprctl_bin" dispatch focuswindow "address:$address" >/dev/null 2>&1; then
+  jq -cn --arg address "$address" '{ ok: true, method: "window", address: $address }'
+  exit 0
+fi
+
+jq -cn '{ ok: false, error: "focus-failed" }'
+exit 1

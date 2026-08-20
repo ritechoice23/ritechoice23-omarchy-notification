@@ -2,201 +2,117 @@
 set -euo pipefail
 
 LIMIT="${1:-200}"
-
 [[ "$LIMIT" =~ ^[0-9]+$ ]] || LIMIT=200
 (( LIMIT > 0 )) || LIMIT=200
 
 STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
-
 OMARCHY_DIR="$STATE_HOME/omarchy/notifications"
 STATE_DIR="$STATE_HOME/ritechoice23-omarchy-notification"
-
 ARCHIVE_DIR="$STATE_DIR/history"
 IMAGE_DIR="$STATE_DIR/images"
 DISMISSED_DIR="$STATE_DIR/dismissed"
-
 LAST_SEEN_FILE="$STATE_DIR/last-seen"
 
-mkdir -p \
-  "$ARCHIVE_DIR" \
-  "$IMAGE_DIR" \
-  "$DISMISSED_DIR"
+mkdir -p "$ARCHIVE_DIR" "$IMAGE_DIR" "$DISMISSED_DIR"
 
-# A dismissed marker only needs to outlive Omarchy's own short history.
-# Remove old markers eventually so the state folder stays tidy.
-find "$DISMISSED_DIR" \
-  -maxdepth 1 \
-  -type f \
-  -mtime +30 \
-  -delete 2>/dev/null || true
+# The bar has one widget instance per output. Serialize archive work so two
+# monitors cannot prune, dismiss, or rewrite the same record concurrently.
+exec 9>"$STATE_DIR/state.lock"
+flock 9
+
+atomic_write() {
+  local destination="$1" content="$2" temporary
+  temporary="$(mktemp "$STATE_DIR/.write.XXXXXX")"
+  printf '%s\n' "$content" > "$temporary"
+  mv -f -- "$temporary" "$destination"
+}
+
+copy_image() {
+  local source="$1" destination="$2" temporary
+  temporary="$(mktemp "$IMAGE_DIR/.image.XXXXXX")"
+  if cp -- "$source" "$temporary" 2>/dev/null; then
+    mv -f -- "$temporary" "$destination"
+    return 0
+  fi
+  rm -f -- "$temporary"
+  return 1
+}
+
+find "$DISMISSED_DIR" -maxdepth 1 -type f -mtime +30 -delete 2>/dev/null || true
 
 sync_file() {
   local source="$1"
-
-  local file
-  local stem
-  local json
-  local role
-  local value
-  local source_path
-  local image_copy
-  local image_uri
+  local file stem json role value source_path image_copy image_uri
 
   file="$(basename "$source")"
   stem="${file%.json}"
-
   [[ -f "$source" ]] || return 0
   [[ ! -e "$DISMISSED_DIR/$file" ]] || return 0
 
   json="$(head -n 1 "$source" 2>/dev/null || true)"
   [[ -n "$json" ]] || return 0
+  jq -e 'type == "object"' >/dev/null 2>&1 <<<"$json" || return 0
+  json="$(jq -c --arg file "$file" '. + { _ritechoiceFile: $file }' <<<"$json")"
 
-  if ! jq -e \
-    'type == "object"' \
-    >/dev/null 2>&1 \
-    <<<"$json"
-  then
-    return 0
-  fi
-
-  json="$(
-    jq -c \
-      --arg file "$file" \
-      '. + { _ritechoiceFile: $file }' \
-      <<<"$json"
-  )"
-
-  # Omarchy may eventually delete old image files from its shorter
-  # notification history. Copy file-backed images into our own archive.
+  # Omarchy removes its image cache sooner than this plugin removes history.
   for role in appIcon image; do
-    value="$(
-      jq -r \
-        --arg role "$role" \
-        '.[$role] // empty' \
-        <<<"$json"
-    )"
-
+    value="$(jq -r --arg role "$role" '.[$role] // empty' <<<"$json")"
     [[ -n "$value" ]] || continue
-
-    source_path="$value"
-
-    if [[ "$source_path" == file://* ]]; then
-      source_path="${source_path#file://}"
-    fi
-
+    source_path="${value#file://}"
     if [[ "$source_path" == /* && -f "$source_path" ]]; then
       image_copy="$IMAGE_DIR/${stem}-${role}"
-
-      cp -f -- "$source_path" "$image_copy" \
-        2>/dev/null || true
-
-      if [[ -f "$image_copy" ]]; then
+      if copy_image "$source_path" "$image_copy"; then
         image_uri="file://$image_copy"
-
-        json="$(
-          jq -c \
-            --arg role "$role" \
-            --arg uri "$image_uri" \
-            '.[$role] = $uri' \
-            <<<"$json"
-        )"
+        json="$(jq -c --arg role "$role" --arg uri "$image_uri" '.[$role] = $uri' <<<"$json")"
       fi
     fi
   done
 
-  printf '%s\n' "$json" \
-    > "$ARCHIVE_DIR/$file"
+  atomic_write "$ARCHIVE_DIR/$file" "$json"
 }
 
 shopt -s nullglob
-
-# Mirror notifications that are still visible.
 if [[ -d "$OMARCHY_DIR" ]]; then
-  for source in "$OMARCHY_DIR"/*.json; do
-    sync_file "$source"
-  done
+  for source in "$OMARCHY_DIR"/*.json; do sync_file "$source"; done
 fi
-
-# Mirror notifications Omarchy already moved into history.
 if [[ -d "$OMARCHY_DIR/history" ]]; then
-  for source in "$OMARCHY_DIR/history"/*.json; do
-    sync_file "$source"
-  done
+  for source in "$OMARCHY_DIR/history"/*.json; do sync_file "$source"; done
 fi
 
 archive_files=("$ARCHIVE_DIR"/*.json)
-
-# Keep only the newest LIMIT records in our independent archive.
 if (( ${#archive_files[@]} > LIMIT )); then
   mapfile -t ordered < <(
     for file in "${archive_files[@]}"; do
-      timestamp="$(
-        jq -r \
-          '.timestamp // 0' \
-          "$file" \
-          2>/dev/null ||
-          printf '0'
-      )"
-
-      [[ "$timestamp" =~ ^[0-9]+$ ]] ||
-        timestamp=0
-
-      printf '%s\t%s\n' \
-        "$timestamp" \
-        "$file"
-    done |
-      sort -nr -k1,1 |
-      cut -f2-
+      timestamp="$(jq -r '.timestamp // 0' "$file" 2>/dev/null || printf '0')"
+      [[ "$timestamp" =~ ^[0-9]+$ ]] || timestamp=0
+      printf '%s\t%s\n' "$timestamp" "$file"
+    done | sort -nr -k1,1 | cut -f2-
   )
-
   for (( i=LIMIT; i<${#ordered[@]}; i++ )); do
     file="${ordered[$i]}"
     stem="$(basename "${file%.json}")"
-
-    rm -f -- \
-      "$file" \
-      "$IMAGE_DIR/${stem}-appIcon" \
-      "$IMAGE_DIR/${stem}-image"
+    rm -f -- "$file" "$IMAGE_DIR/${stem}-appIcon" "$IMAGE_DIR/${stem}-image"
   done
 fi
 
 last_seen=0
-
-if [[ -r "$LAST_SEEN_FILE" ]]; then
-  read -r last_seen \
-    < "$LAST_SEEN_FILE" ||
-    true
-fi
-
-[[ "$last_seen" =~ ^[0-9]+$ ]] ||
-  last_seen=0
+if [[ -r "$LAST_SEEN_FILE" ]]; then read -r last_seen < "$LAST_SEEN_FILE" || true; fi
+[[ "$last_seen" =~ ^[0-9]+$ ]] || last_seen=0
 
 archive_files=("$ARCHIVE_DIR"/*.json)
-
 if (( ${#archive_files[@]} == 0 )); then
-  jq -cn \
-    '{ unread: 0, notifications: [] }'
-
+  jq -cn '{ unread: 0, maxTimestamp: 0, notifications: [] }'
   exit 0
 fi
 
-jq -s \
-  --argjson lastSeen "$last_seen" '
-    map(select(type == "object"))
-    | unique_by(._ritechoiceFile)
-    | sort_by(.timestamp // 0)
-    | reverse
-    | {
-        unread: (
-          [
-            .[]
-            | select(
-                (.timestamp // 0) > $lastSeen
-              )
-          ]
-          | length
-        ),
-        notifications: .
-      }
-  ' \
-  "${archive_files[@]}"
+jq -s --argjson lastSeen "$last_seen" '
+  map(select(type == "object"))
+  | unique_by(._ritechoiceFile)
+  | sort_by((.timestamp // 0) | tonumber? // 0)
+  | reverse
+  | {
+      unread: ([.[] | select(((.timestamp // 0) | tonumber? // 0) > $lastSeen)] | length),
+      maxTimestamp: ([.[] | ((.timestamp // 0) | tonumber? // 0)] | max // 0),
+      notifications: .
+    }
+' "${archive_files[@]}"

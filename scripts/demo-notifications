@@ -16,6 +16,14 @@ notify-send \
 sleep 1
 
 notify-send \
+  -u critical \
+  -a "Omarchy" \
+  "Action required" \
+  "This critical sample demonstrates urgency styling."
+
+sleep 1
+
+notify-send \
   -a "WhatsApp" \
   "Project Team" \
   "Babs: The deployment is complete."
