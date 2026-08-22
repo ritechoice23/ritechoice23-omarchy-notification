@@ -134,10 +134,24 @@ if bash "$ROOT/scripts/activate-notification" ../outside.json Auto >/dev/null 2>
   exit 1
 fi
 
+# Background mode snapshots the record before atomically dismissing it, so
+# immediate UI removal cannot race activation's metadata read.
+write_record background.json "Not Running" "Message"
+printf '[]\n' > "$clients_file"
+if bash "$ROOT/scripts/activate-notification" background.json Auto Dismiss > "$TEST_ROOT/background.json.result"; then
+  echo "unavailable background target unexpectedly activated" >&2
+  exit 1
+fi
+jq -e '.error == "app-window-unavailable"' "$TEST_ROOT/background.json.result" >/dev/null
+[[ ! -e "$STATE_DIR/history/background.json" ]]
+[[ -f "$STATE_DIR/dismissed/background.json" ]]
+
 # The QML contract dismisses immediately and performs activation after the
 # panel has closed. Background failure must not restore the card.
-rg -U 'function activateOne\(entry\)[\s\S]*root\.dismissOne\(file\)[\s\S]*root\.close\(\)[\s\S]*activateProc\.command' "$ROOT/Panel.qml" >/dev/null
+rg -U 'function activateOne\(entry\)[\s\S]*root\.removeLocal\(file\)[\s\S]*root\.close\(\)[\s\S]*activateProc\.command = \["/bin/bash", activateScript, file, clickAction, "Dismiss"\]' "$ROOT/Panel.qml" >/dev/null
 rg 'if \(!entry \|\| activationEntry \|\| clickAction === "Nothing"\) return' "$ROOT/Panel.qml" >/dev/null
+rg -U 'function invokeLiveDefault\(entry\)[\s\S]*action\.identifier === "default"[\s\S]*notificationService\.invokePopupDefault\(index\)' "$ROOT/Panel.qml" >/dev/null
+rg 'usableImage\(live && live\.image\) \|\| usableImage\(entry\.image\) \|\| usableImage\(entry\.appIcon\)' "$ROOT/Panel.qml" >/dev/null
 if rg 'Opening…|root\.dismissOne\(file\)' "$ROOT/NotificationCard.qml" >/dev/null; then
   echo "notification card still exposes blocking activation UI" >&2
   exit 1

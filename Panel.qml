@@ -143,7 +143,51 @@ Panel {
     return Quickshell.iconPath(source, true)
   }
 
-  function iconSource(entry) { return entry ? (usableImage(entry.appIcon) || usableImage(entry.image)) : "" }
+  function livePopupIndex(entry) {
+    var model = notificationService ? notificationService.popupModel : null
+    if (!entry || !model || typeof model.get !== "function") return -1
+    var originalId = Number(entry.originalId || entry.id || 0)
+    var timestamp = numericTimestamp(entry.timestamp)
+    for (var i = 0; i < model.count; i++) {
+      var row = model.get(i)
+      if (row && Number(row.originalId || row.id || 0) === originalId
+          && numericTimestamp(row.timestamp) === timestamp) return i
+    }
+    return -1
+  }
+
+  function livePopup(entry) {
+    var index = livePopupIndex(entry)
+    return index >= 0 ? notificationService.popupModel.get(index) : null
+  }
+
+  function invokeLiveDefault(entry) {
+    var index = livePopupIndex(entry)
+    if (index < 0 || !notificationService) return false
+    var row = notificationService.popupModel.get(index)
+    if (typeof notificationService.isRestoredRow === "function" && notificationService.isRestoredRow(row)) return false
+    var refs = notificationService.liveRefs
+    var ref = refs ? refs[row.originalId] : null
+    try {
+      if (!ref || !ref.actions) return false
+      for (var i = 0; i < ref.actions.length; i++) {
+        var action = ref.actions[i]
+        if (action && action.identifier === "default") {
+          notificationService.invokePopupDefault(index)
+          return true
+        }
+      }
+    } catch (error) {
+      console.warn("RiteChoice23 Notification: live default action unavailable:", error)
+    }
+    return false
+  }
+
+  function iconSource(entry) {
+    if (!entry) return ""
+    var live = livePopup(entry)
+    return usableImage(live && live.image) || usableImage(entry.image) || usableImage(entry.appIcon)
+  }
   function previewSource(entry) { return entry && root.showPreview ? (usableImage(entry.preview) || usableImage(entry.image)) : "" }
 
   function numericTimestamp(value) {
@@ -259,10 +303,18 @@ Panel {
   function dismissOne(fileName) {
     var file = String(fileName || "")
     if (!validFileName(file) || pendingDismissals[file]) return
+    markPending(file)
+    removeLocal(file)
+    queueRemoval(file)
+  }
+
+  function markPending(file) {
     var pending = Object.assign({}, pendingDismissals)
     pending[file] = true
     pendingDismissals = pending
-    removeLocal(file)
+  }
+
+  function queueRemoval(file) {
     dismissQueue = dismissQueue.concat([file])
     runNextDismissal()
   }
@@ -286,9 +338,15 @@ Panel {
     if (!validFileName(file)) return
     activationEntry = entry
     activationOutput = ""
-    root.dismissOne(file)
+    root.markPending(file)
+    root.removeLocal(file)
     root.close()
-    activateProc.command = ["/bin/bash", activateScript, file, clickAction]
+    if (root.invokeLiveDefault(entry)) {
+      root.queueRemoval(file)
+      activationEntry = null
+      return
+    }
+    activateProc.command = ["/bin/bash", activateScript, file, clickAction, "Dismiss"]
     activateProc.running = true
   }
 
@@ -439,10 +497,15 @@ Panel {
     onExited: function(exitCode) {
       Qt.callLater(function() {
         var result = null
+        var file = root.activationEntry ? String(root.activationEntry._ritechoiceFile || "") : ""
         try { result = JSON.parse(root.activationOutput || "{}") } catch (error) {}
         if (exitCode !== 0 || !result || !result.ok)
           console.warn("RiteChoice23 Notification: background activation failed:", result ? result.error : "invalid-response")
+        var pending = Object.assign({}, root.pendingDismissals)
+        delete pending[file]
+        root.pendingDismissals = pending
         root.activationEntry = null
+        root.refresh()
       })
     }
   }

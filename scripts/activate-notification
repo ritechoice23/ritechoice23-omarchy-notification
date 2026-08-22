@@ -3,6 +3,7 @@ set -euo pipefail
 
 file="${1:-}"
 click_action="${2:-Auto}"
+dismiss_after_read="${3:-Keep}"
 [[ -n "$file" && "$file" == "$(basename "$file")" && "$file" == *.json ]] || {
   jq -cn '{ ok: false, error: "invalid-notification" }'
   exit 2
@@ -12,6 +13,7 @@ STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
 STATE_DIR="$STATE_HOME/ritechoice23-omarchy-notification"
 IMAGE_DIR="$STATE_DIR/images"
 record="$STATE_DIR/history/$file"
+store_cli="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../bin" && pwd)/notification-center"
 [[ -f "$record" ]] || {
   jq -cn '{ ok: false, error: "notification-missing" }'
   exit 1
@@ -31,6 +33,10 @@ jq -e 'type == "object"' >/dev/null 2>&1 <<<"$json" || {
 # attacker-controlled delayed shell action.
 flock -u 9
 exec 9>&-
+
+dismiss_record() {
+  [[ "$dismiss_after_read" != Dismiss ]] || "$store_cli" remove "$file" >/dev/null
+}
 
 case "$click_action" in
   Auto|"Focus the app"|Nothing) ;;
@@ -53,9 +59,11 @@ if [[ "$click_action" == Auto ]]; then
     if [[ -n "$canonical_dir" && "$canonical_image" == "$canonical_dir/"* && "$mime" == image/* && "$size" =~ ^[0-9]+$ && "$size" -gt 0 && "$size" -le 5242880 ]]; then
       open_bin="${RITECHOICE_XDG_OPEN_BIN:-xdg-open}"
       if "$open_bin" "$canonical_image" >/dev/null 2>&1; then
+        dismiss_record
         jq -cn --arg file "$canonical_image" '{ ok: true, method: "image", file: $file }'
         exit 0
       fi
+      dismiss_record
       jq -cn '{ ok: false, error: "image-open-failed" }'
       exit 1
     fi
@@ -66,6 +74,7 @@ app="$(jq -r '.app // empty' <<<"$json")"
 body="$(jq -r '.body // empty' <<<"$json")"
 origin="$(printf '%s\n' "$body" | sed -nE 's#.*https?://([^/"< >]+).*#\1#p' | head -n 1)"
 origin="${origin,,}"
+dismiss_record
 
 hyprctl_bin="${RITECHOICE_HYPRCTL_BIN:-hyprctl}"
 clients="$($hyprctl_bin -j clients 2>/dev/null || true)"

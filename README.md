@@ -11,7 +11,8 @@ It keeps every retained notification as an individual chronological card, follow
 - **Searchable history** — Search app names, titles, and message bodies with the header button, `/`, or `Ctrl+F`.
 - **Individual chronological cards** — Newest first, separated into Today, Yesterday, weekdays, and older dates.
 - **Complete keyboard control** — Arrow or Vim navigation, Enter to activate, `x` to dismiss, Escape to close, and Tab to switch panels.
-- **Safe click-to-open** — Opens only a validated archived image or focuses the strongest matching existing Hyprland window. Stored shell text is never executed.
+- **Safe click-to-open** — Invokes a live notification’s canonical default action when available, otherwise opens only a validated archived image or focuses the strongest matching Hyprland window. Stored shell text is never executed.
+- **Live sender media** — Reuses Omarchy’s live notification image for avatars before falling back to archived media or the application icon.
 - **Exact PWA focus** — Web origins, desktop entries, `StartupWMClass`, and normalized client metadata are scored before focusing the exact window address.
 - **Do Not Disturb** — Toggle DND in the panel or right-click the bar bell without opening it.
 - **Private durable storage** — State directories are `0700`; records and media are `0600`; writes and multi-monitor access are serialized.
@@ -49,7 +50,7 @@ The local installer validates and stages the complete plugin before replacing th
 | `Escape` | Leave search, then close the panel |
 | `Tab` / `Shift+Tab` | Switch to an adjacent bar panel |
 
-Activation removes the card and updates the count immediately. The panel closes while image opening or window focus continues silently in the background; a failed background activation does not restore the card.
+Activation removes the card and updates the count immediately. The panel closes while the sender’s live default action, image opening, or window focus continues in the background. Live browser notifications can therefore jump to their exact conversation while the sender action still exists; expired history safely falls back to matching the existing application window.
 
 ## Settings
 

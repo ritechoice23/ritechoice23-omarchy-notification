@@ -10,6 +10,7 @@
 - Added Dot/Count/None badges, body/preview privacy controls, click policy, retention days, and configurable panel width
 - Preserved existing IPC commands, per-notification archives, legacy `showBadge` behavior, and exact keyboard selection
 - Made card activation dismiss immediately and continue image opening or window focus silently in the background
+- Reused live notification media for sender avatars and live default actions for exact chat/PWA navigation, with safe archived fallback
 - Expanded security, migration, media, watcher, concurrency, search, retention, activation, and UI-contract tests
 
 ## 1.1.0 - 2026-08-20
