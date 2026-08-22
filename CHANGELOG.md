@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.0.0 - 2026-08-22
+
+- Removed archived shell-command execution and sanitize existing v1 action fields on first synchronization
+- Added safe validated-image opening plus exact-address PWA, desktop-entry, and app-window focus
+- Consolidated archive operations into one JSON CLI with watch, list, search, remove, clear, seen, unread, prune, sync, and seed commands
+- Enforced private state permissions, atomic writes, multi-monitor locking, bounded image copies, MIME validation, age/count retention, and orphan cleanup
+- Added full-text search, Do Not Disturb controls, adaptive panel height, compact cards, per-card unread markers, and double-confirm Clear All
+- Added Dot/Count/None badges, body/preview privacy controls, click policy, retention days, and configurable panel width
+- Preserved existing IPC commands, per-notification archives, legacy `showBadge` behavior, and exact keyboard selection
+- Made card activation dismiss immediately and continue image opening or window focus silently in the background
+- Expanded security, migration, media, watcher, concurrency, search, retention, activation, and UI-contract tests
+
 ## 1.1.0 - 2026-08-20
 
 - Replaced collapsed app groups with a chronological, virtualized card list

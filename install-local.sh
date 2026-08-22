@@ -41,6 +41,7 @@ if [[ "$SOURCE_DIR" != "$TARGET_DIR" ]]; then
     "$SOURCE_DIR/README.md" \
     "$SOURCE_DIR/LICENSE" \
     "$SOURCE_DIR/CHANGELOG.md" \
+    "$SOURCE_DIR/bin" \
     "$SOURCE_DIR/scripts" \
     "$STAGING_DIR/"
 

@@ -2,9 +2,11 @@
   "schemaVersion": 1,
   "id": "ritechoice23.omarchy.notification",
   "name": "RiteChoice23 Notification",
-  "version": "1.1.0",
+  "version": "2.0.0",
   "author": "RiteChoice23",
-  "description": "A polished, chronological notification center for the Omarchy top bar.",
+  "description": "A private, searchable, keyboard-driven notification center for the Omarchy top bar.",
+  "homepage": "https://github.com/ritechoice23/ritechoice23-omarchy-notification",
+  "license": "MIT",
   "kinds": [
     "bar-widget"
   ],
@@ -13,30 +15,79 @@
   },
   "barWidget": {
     "displayName": "RiteChoice23 Notification",
-    "description": "Chronological history, smart app focus, unread badge, dismiss and clear actions",
+    "description": "Searchable history, safe app focus, DND, privacy controls, and durable media",
     "category": "System",
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
-      "historyLimit": 200,
-      "showBadge": true
+      "historyLimit": 1000,
+      "keepDays": 30,
+      "badge": "Count",
+      "clickAction": "Auto",
+      "showBody": true,
+      "showPreview": true,
+      "panelWidth": 440
     },
     "schema": [
       {
         "key": "historyLimit",
         "type": "integer",
-        "label": "Maximum notifications to keep",
-        "min": 10,
-        "max": 500,
-        "step": 10,
-        "defaultValue": 200,
-        "description": "How many notifications to retain in the archive before older entries are pruned."
+        "label": "Keep at most",
+        "min": 50,
+        "max": 10000,
+        "step": 50,
+        "defaultValue": 1000,
+        "description": "Maximum archived notifications. The age and count limits are both enforced."
       },
       {
-        "key": "showBadge",
+        "key": "keepDays",
+        "type": "integer",
+        "label": "Keep notifications for",
+        "min": 1,
+        "max": 365,
+        "step": 1,
+        "defaultValue": 30,
+        "description": "Days before archived notifications and their media are removed."
+      },
+      {
+        "key": "badge",
+        "type": "enum",
+        "label": "Unread marker",
+        "options": ["Dot", "Count", "None"],
+        "defaultValue": "Count",
+        "description": "Show a subtle dot, an unread count, or no marker on the bar bell."
+      },
+      {
+        "key": "clickAction",
+        "type": "enum",
+        "label": "Clicking a notification",
+        "options": ["Auto", "Focus the app", "Nothing"],
+        "defaultValue": "Auto",
+        "description": "Auto opens a validated archived image or focuses the best matching existing window. Stored shell commands are never executed."
+      },
+      {
+        "key": "showBody",
         "type": "boolean",
-        "label": "Show unread count badge on bar icon",
-        "defaultValue": true
+        "label": "Show message text",
+        "defaultValue": true,
+        "description": "Turn off message bodies when the screen may be visible to other people."
+      },
+      {
+        "key": "showPreview",
+        "type": "boolean",
+        "label": "Keep and show pictures",
+        "defaultValue": true,
+        "description": "When disabled, cached notification pictures are purged while app icons are retained."
+      },
+      {
+        "key": "panelWidth",
+        "type": "integer",
+        "label": "Panel width",
+        "min": 340,
+        "max": 620,
+        "step": 20,
+        "defaultValue": 440,
+        "description": "Preferred panel width; it is clamped to the available screen space."
       }
     ]
   }

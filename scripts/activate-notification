@@ -2,6 +2,7 @@
 set -euo pipefail
 
 file="${1:-}"
+click_action="${2:-Auto}"
 [[ -n "$file" && "$file" == "$(basename "$file")" && "$file" == *.json ]] || {
   jq -cn '{ ok: false, error: "invalid-notification" }'
   exit 2
@@ -9,6 +10,7 @@ file="${1:-}"
 
 STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
 STATE_DIR="$STATE_HOME/ritechoice23-omarchy-notification"
+IMAGE_DIR="$STATE_DIR/images"
 record="$STATE_DIR/history/$file"
 [[ -f "$record" ]] || {
   jq -cn '{ ok: false, error: "notification-missing" }'
@@ -24,18 +26,39 @@ jq -e 'type == "object"' >/dev/null 2>&1 <<<"$json" || {
   exit 1
 }
 
-# The record is now in memory. Do not let a detached action inherit and hold
-# the state lock for the lifetime of the launched application.
+# The record is now in memory. Never execute `.exec`: any local process can
+# send a notification and choose that value, so an archived command is an
+# attacker-controlled delayed shell action.
 flock -u 9
 exec 9>&-
 
-action="$(jq -r '.exec // empty' <<<"$json")"
-if [[ -n "$action" ]]; then
-  # This is the same persisted omarchy-exec contract used by Omarchy's own
-  # notification service. Detach it so shell restarts do not kill the action.
-  if setsid --fork bash -lc "$action" >/dev/null 2>&1; then
-    jq -cn '{ ok: true, method: "action" }'
-    exit 0
+case "$click_action" in
+  Auto|"Focus the app"|Nothing) ;;
+  *) click_action=Auto ;;
+esac
+
+if [[ "$click_action" == Nothing ]]; then
+  jq -cn '{ ok: false, error: "activation-disabled" }'
+  exit 1
+fi
+
+if [[ "$click_action" == Auto ]]; then
+  image_uri="$(jq -r '.preview // .image // empty' <<<"$json")"
+  image_path="${image_uri#file://}"
+  if [[ -n "$image_path" && "$image_path" == "$IMAGE_DIR/"* && -f "$image_path" ]]; then
+    canonical_image="$(realpath -e -- "$image_path" 2>/dev/null || true)"
+    canonical_dir="$(realpath -e -- "$IMAGE_DIR" 2>/dev/null || true)"
+    mime="$(file -bL --mime-type -- "$canonical_image" 2>/dev/null || true)"
+    size="$(stat -c '%s' -- "$canonical_image" 2>/dev/null || printf '0')"
+    if [[ -n "$canonical_dir" && "$canonical_image" == "$canonical_dir/"* && "$mime" == image/* && "$size" =~ ^[0-9]+$ && "$size" -gt 0 && "$size" -le 5242880 ]]; then
+      open_bin="${RITECHOICE_XDG_OPEN_BIN:-xdg-open}"
+      if "$open_bin" "$canonical_image" >/dev/null 2>&1; then
+        jq -cn --arg file "$canonical_image" '{ ok: true, method: "image", file: $file }'
+        exit 0
+      fi
+      jq -cn '{ ok: false, error: "image-open-failed" }'
+      exit 1
+    fi
   fi
 fi
 

@@ -9,7 +9,9 @@ BorderSurface {
 
   required property var entry
   property bool selected: false
-  property bool pending: false
+  property bool unread: false
+  property bool showBody: true
+  property bool showPreview: true
   property color foreground: Color.notifications.text
   property string fontFamily: Style.font.family
   property var cleanText
@@ -28,7 +30,7 @@ BorderSurface {
   readonly property string previewImage: previewSource(entry)
   readonly property color secondaryText: Qt.darker(foreground, 1.35)
   readonly property color tertiaryText: Qt.darker(foreground, 1.8)
-  readonly property int cardPadding: Style.space(12)
+  readonly property int cardPadding: Style.space(10)
 
   width: ListView.view ? ListView.view.width : implicitWidth
   implicitHeight: contentColumn.implicitHeight + cardPadding * 2
@@ -53,7 +55,6 @@ BorderSurface {
   MouseArea {
     anchors.fill: parent
     cursorShape: Qt.PointingHandCursor
-    enabled: !root.pending
     onClicked: root.activateRequested()
   }
 
@@ -63,15 +64,15 @@ BorderSurface {
     anchors.right: parent.right
     anchors.top: parent.top
     anchors.margins: root.cardPadding
-    spacing: Style.space(8)
+    spacing: Style.space(6)
 
     RowLayout {
       Layout.fillWidth: true
-      spacing: Style.space(9)
+      spacing: Style.space(8)
 
       Rectangle {
-        Layout.preferredWidth: Style.space(34)
-        Layout.preferredHeight: Style.space(34)
+        Layout.preferredWidth: Style.space(30)
+        Layout.preferredHeight: Style.space(30)
         Layout.alignment: Qt.AlignVCenter
         radius: Style.cornerRadius > 0 ? Math.min(Style.space(9), Style.cornerRadius) : 0
         color: Style.normalFillFor(root.foreground, Color.accent)
@@ -96,7 +97,7 @@ BorderSurface {
           color: root.foreground
           font.family: root.fontFamily
           font.pixelSize: Style.font.title
-          font.bold: true
+          font.bold: root.unread
         }
       }
 
@@ -123,6 +124,15 @@ BorderSurface {
           font.pixelSize: Style.font.caption
           elide: Text.ElideRight
         }
+      }
+
+      Rectangle {
+        Layout.preferredWidth: Style.space(7)
+        Layout.preferredHeight: width
+        Layout.alignment: Qt.AlignVCenter
+        visible: root.unread
+        radius: width / 2
+        color: Color.accent
       }
 
       Rectangle {
@@ -170,28 +180,27 @@ BorderSurface {
       font.family: root.fontFamily
       font.pixelSize: Style.font.title
       font.bold: true
+      elide: Text.ElideRight
+      maximumLineCount: 1
+    }
+
+    Text {
+      Layout.fillWidth: true
+      visible: root.showBody && text.length > 0
+      text: root.cleanText(root.entry.body)
+      textFormat: Text.PlainText
+      color: root.secondaryText
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
       wrapMode: Text.WordWrap
       maximumLineCount: 2
       elide: Text.ElideRight
     }
 
-    Text {
-      Layout.fillWidth: true
-      visible: text.length > 0
-      text: root.cleanText(root.entry.body)
-      textFormat: Text.PlainText
-      color: root.secondaryText
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.body
-      wrapMode: Text.WordWrap
-      maximumLineCount: 4
-      elide: Text.ElideRight
-    }
-
     Image {
       Layout.fillWidth: true
-      Layout.preferredHeight: visible ? Math.min(implicitHeight, Style.space(150)) : 0
-      visible: root.previewImage.length > 0 && status !== Image.Error
+      Layout.preferredHeight: visible ? Math.min(implicitHeight, Style.space(120)) : 0
+      visible: root.showPreview && root.previewImage.length > 0 && status !== Image.Error
       source: root.previewImage
       sourceSize.width: width * Screen.devicePixelRatio
       fillMode: Image.PreserveAspectCrop
@@ -225,13 +234,6 @@ BorderSurface {
 
       Item { Layout.fillWidth: true }
 
-      Text {
-        visible: root.pending
-        text: "Opening…"
-        color: root.tertiaryText
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-      }
     }
   }
 }

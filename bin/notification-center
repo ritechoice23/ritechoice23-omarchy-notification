@@ -1,0 +1,524 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+# Notifications frequently contain private messages and one-time codes. Every
+# file created by this store is private by default, including temporary files.
+umask 077
+
+STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
+SOURCE_DIR="${RITECHOICE_NOTIFICATION_SOURCE:-$STATE_HOME/omarchy/notifications}"
+STATE_DIR="${RITECHOICE_NOTIFICATION_STATE:-$STATE_HOME/ritechoice23-omarchy-notification}"
+ARCHIVE_DIR="$STATE_DIR/history"
+IMAGE_DIR="$STATE_DIR/images"
+DISMISSED_DIR="$STATE_DIR/dismissed"
+LAST_SEEN_FILE="$STATE_DIR/last-seen"
+LOCK_FILE="$STATE_DIR/state.lock"
+PREVIEW_DISABLED_MARKER="$STATE_DIR/previews-disabled"
+MIGRATION_MARKER="$STATE_DIR/schema-v2"
+
+KEEP_DAYS="${RITECHOICE_KEEP_DAYS:-30}"
+HISTORY_LIMIT="${RITECHOICE_HISTORY_LIMIT:-1000}"
+KEEP_PREVIEWS="${RITECHOICE_KEEP_PREVIEWS:-1}"
+MAX_IMAGE_BYTES=5242880
+
+json_error() {
+  local message="$1" code="${2:-1}"
+  jq -cn --arg error "$message" '{ok:false,error:$error}'
+  exit "$code"
+}
+
+command -v jq >/dev/null 2>&1 || {
+  printf '%s\n' '{"ok":false,"error":"jq-not-installed"}'
+  exit 1
+}
+
+[[ "$KEEP_DAYS" =~ ^[0-9]+$ ]] || KEEP_DAYS=30
+[[ "$HISTORY_LIMIT" =~ ^[0-9]+$ ]] || HISTORY_LIMIT=1000
+(( KEEP_DAYS >= 1 )) || KEEP_DAYS=30
+(( HISTORY_LIMIT >= 1 )) || HISTORY_LIMIT=1000
+[[ "$KEEP_PREVIEWS" == 0 || "$KEEP_PREVIEWS" == 1 ]] || KEEP_PREVIEWS=1
+
+ensure_state() {
+  mkdir -p "$STATE_DIR" "$ARCHIVE_DIR" "$IMAGE_DIR" "$DISMISSED_DIR" || return 1
+  chmod 700 "$STATE_DIR" "$ARCHIVE_DIR" "$IMAGE_DIR" "$DISMISSED_DIR" 2>/dev/null || true
+  find "$ARCHIVE_DIR" "$IMAGE_DIR" "$DISMISSED_DIR" -maxdepth 1 -type f -exec chmod 600 {} + 2>/dev/null || true
+  [[ ! -e "$LAST_SEEN_FILE" ]] || chmod 600 "$LAST_SEEN_FILE" 2>/dev/null || true
+  [[ ! -e "$LOCK_FILE" ]] || chmod 600 "$LOCK_FILE" 2>/dev/null || true
+}
+
+with_lock() {
+  (
+    exec 9>"$LOCK_FILE"
+    flock 9
+    "$@"
+  )
+}
+
+valid_name() {
+  [[ "${1:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.json$ && "$1" == "$(basename -- "$1")" ]]
+}
+
+atomic_text() {
+  local destination="$1" content="$2" temporary
+  temporary="$(mktemp "$STATE_DIR/.write.XXXXXX")" || return 1
+  printf '%s\n' "$content" > "$temporary"
+  chmod 600 "$temporary" 2>/dev/null || true
+  mv -f -- "$temporary" "$destination"
+}
+
+remove_media_for_stem() {
+  local stem="$1"
+  rm -f -- "$IMAGE_DIR/${stem}-appIcon" "$IMAGE_DIR/${stem}-image" "$IMAGE_DIR/${stem}-preview"
+}
+
+copy_image() {
+  local source="$1" stem="$2" role="$3" destination temporary mime size
+  source="${source#file://}"
+  [[ "$source" == /* && -f "$source" ]] || return 1
+  command -v file >/dev/null 2>&1 || return 1
+
+  destination="$IMAGE_DIR/${stem}-${role}"
+  temporary="$(mktemp "$IMAGE_DIR/.image.XXXXXX")" || return 1
+  if ! timeout 5 head -c $((MAX_IMAGE_BYTES + 1)) -- "$source" > "$temporary" 2>/dev/null; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+  size="$(stat -c '%s' -- "$temporary" 2>/dev/null || printf '0')"
+  if (( size <= 0 || size > MAX_IMAGE_BYTES )); then
+    rm -f -- "$temporary"
+    return 1
+  fi
+  mime="$(file -bL --mime-type -- "$temporary" 2>/dev/null || true)"
+  [[ "$mime" == image/* ]] || {
+    rm -f -- "$temporary"
+    return 1
+  }
+
+  if [[ "$role" == preview ]] && command -v magick >/dev/null 2>&1; then
+    if timeout 8 magick "$temporary" -auto-orient -resize '720x720>' -strip -quality 82 "$temporary.resized" 2>/dev/null; then
+      mv -f -- "$temporary.resized" "$temporary"
+    fi
+    rm -f -- "$temporary.resized"
+  fi
+
+  chmod 600 "$temporary" 2>/dev/null || true
+  mv -f -- "$temporary" "$destination"
+  printf 'file://%s' "$destination"
+}
+
+preview_path_from_exec() {
+  # Deliberately narrow: extract only a simple absolute image path. The shell
+  # command itself is never archived or executed.
+  printf '%s' "$1" | grep -oiE '(file://)?/[^"'"'"'[:space:]]+\.(jpe?g|png|webp|gif)' | head -n 1
+}
+
+sanitize_archives() {
+  local file name json
+  shopt -s nullglob
+  for file in "$ARCHIVE_DIR"/*.json; do
+    valid_name "$(basename -- "$file")" || {
+      rm -f -- "$file"
+      continue
+    }
+    if ! jq -e 'type == "object"' "$file" >/dev/null 2>&1; then
+      rm -f -- "$file"
+      continue
+    fi
+    name="$(basename -- "$file")"
+    if jq -e --arg file "$name" 'has("exec") or has("actions") or ._ritechoiceFile != $file' "$file" >/dev/null 2>&1; then
+      json="$(jq -c --arg file "$name" 'del(.exec, .actions) | ._ritechoiceFile = $file' "$file")" || continue
+      atomic_text "$file" "$json"
+    fi
+    chmod 600 "$file" 2>/dev/null || true
+  done
+}
+
+sync_file() {
+  local source="$1" announce_existing="${2:-0}"
+  local name stem json app_icon image preview_source app_copy image_copy preview_copy
+
+  [[ -f "$source" ]] || return 0
+  name="$(basename -- "$source")"
+  valid_name "$name" || return 0
+  stem="${name%.json}"
+  [[ ! -e "$DISMISSED_DIR/$name" ]] || return 0
+
+  if [[ -f "$ARCHIVE_DIR/$name" ]]; then
+    (( announce_existing )) && jq -c '.' "$ARCHIVE_DIR/$name" 2>/dev/null || true
+    return 0
+  fi
+  jq -e 'type == "object"' "$source" >/dev/null 2>&1 || return 0
+
+  app_icon="$(jq -r '.appIcon // empty' "$source")"
+  image="$(jq -r '.image // empty' "$source")"
+  preview_source="$(preview_path_from_exec "$(jq -r '.exec // empty' "$source")")"
+  preview_source="${preview_source#file://}"
+
+  app_copy="$app_icon"
+  if [[ "$app_icon" == file:///* || "$app_icon" == /* ]]; then
+    app_copy="$(copy_image "$app_icon" "$stem" appIcon || true)"
+  fi
+
+  image_copy=""
+  preview_copy=""
+  if (( KEEP_PREVIEWS )); then
+    if [[ "$image" == file:///* || "$image" == /* ]]; then
+      image_copy="$(copy_image "$image" "$stem" image || true)"
+    else
+      image_copy="$image"
+    fi
+    if [[ -n "$preview_source" ]]; then
+      preview_copy="$(copy_image "$preview_source" "$stem" preview || true)"
+    fi
+  fi
+
+  json="$(jq -c \
+    --arg file "$name" \
+    --arg appIcon "$app_copy" \
+    --arg image "$image_copy" \
+    --arg preview "$preview_copy" \
+    '{
+      id: (.id // 0),
+      originalId: (.originalId // .id // 0),
+      app: (.app // ""),
+      appIcon: $appIcon,
+      summary: (.summary // ""),
+      body: (.body // ""),
+      image: $image,
+      preview: $preview,
+      glyph: (.glyph // ""),
+      urgency: (.urgency // 1),
+      timestamp: (.timestamp // 0),
+      _ritechoiceFile: $file
+    }
+    | .timestamp = ((.timestamp | tonumber?) // 0)
+    | del(.exec, .actions)' "$source" 2>/dev/null)" || return 0
+
+  atomic_text "$ARCHIVE_DIR/$name" "$json" || return 0
+  printf '%s\n' "$json"
+}
+
+sync_all() {
+  local source
+  shopt -s nullglob
+  for source in "$SOURCE_DIR/history"/*.json "$SOURCE_DIR"/*.json; do
+    sync_file "$source" 0 >/dev/null
+  done
+}
+
+purge_previews() {
+  local file json stem
+  (( KEEP_PREVIEWS == 0 )) || return 0
+  shopt -s nullglob
+  for file in "$ARCHIVE_DIR"/*.json; do
+    stem="$(basename "${file%.json}")"
+    rm -f -- "$IMAGE_DIR/${stem}-image" "$IMAGE_DIR/${stem}-preview"
+    if jq -e '(.image // "") != "" or (.preview // "") != ""' "$file" >/dev/null 2>&1; then
+      json="$(jq -c '.image = "" | .preview = "" | del(.exec, .actions)' "$file" 2>/dev/null)" || continue
+      atomic_text "$file" "$json"
+    fi
+  done
+}
+
+apply_preview_policy() {
+  if (( KEEP_PREVIEWS == 0 )); then
+    if [[ ! -e "$PREVIEW_DISABLED_MARKER" ]]; then
+      purge_previews
+      : > "$PREVIEW_DISABLED_MARKER"
+      chmod 600 "$PREVIEW_DISABLED_MARKER" 2>/dev/null || true
+    fi
+  else
+    rm -f -- "$PREVIEW_DISABLED_MARKER"
+  fi
+}
+
+prune_locked() {
+  local now cutoff file stem
+  local -a files=() stale=()
+  now="$(date +%s%3N)"
+  cutoff=$((now - KEEP_DAYS * 86400000))
+
+  shopt -s nullglob
+  files=("$ARCHIVE_DIR"/*.json)
+  if (( ${#files[@]} > 0 )); then
+    mapfile -t stale < <(jq -sr --argjson cutoff "$cutoff" --argjson limit "$HISTORY_LIMIT" '
+      map(select(type == "object"))
+      | sort_by((.timestamp | tonumber?) // 0)
+      | reverse
+      | to_entries[]
+      | select(.key >= $limit or (((.value.timestamp | tonumber?) // 0) < $cutoff))
+      | .value._ritechoiceFile // empty
+    ' "${files[@]}" 2>/dev/null)
+  fi
+
+  for file in "${stale[@]}"; do
+    valid_name "$file" || continue
+    stem="${file%.json}"
+    rm -f -- "$ARCHIVE_DIR/$file"
+    remove_media_for_stem "$stem"
+  done
+
+  find "$DISMISSED_DIR" -maxdepth 1 -type f -mtime +30 -delete 2>/dev/null || true
+}
+
+sweep_orphans() {
+  local image base stem
+  shopt -s nullglob
+  for image in "$IMAGE_DIR"/*; do
+    [[ -f "$image" ]] || continue
+    base="$(basename -- "$image")"
+    stem="${base%-appIcon}"
+    stem="${stem%-image}"
+    stem="${stem%-preview}"
+    [[ -f "$ARCHIVE_DIR/$stem.json" ]] || rm -f -- "$image"
+  done
+}
+
+prepare_locked() {
+  if [[ ! -e "$MIGRATION_MARKER" ]]; then
+    sanitize_archives
+    : > "$MIGRATION_MARKER"
+    chmod 600 "$MIGRATION_MARKER" 2>/dev/null || true
+  fi
+  sync_all
+  apply_preview_policy
+  prune_locked
+  sweep_orphans
+}
+
+notification_result() {
+  local query="${1:-}" limit="${2:-$HISTORY_LIMIT}" last_seen=0 file
+  local -a files=()
+  [[ "$limit" =~ ^[0-9]+$ ]] || limit="$HISTORY_LIMIT"
+  (( limit >= 1 )) || limit="$HISTORY_LIMIT"
+  [[ -r "$LAST_SEEN_FILE" ]] && read -r last_seen < "$LAST_SEEN_FILE" || true
+  [[ "$last_seen" =~ ^[0-9]+$ ]] || last_seen=0
+
+  shopt -s nullglob
+  files=("$ARCHIVE_DIR"/*.json)
+  if (( ${#files[@]} == 0 )); then
+    jq -cn --argjson lastSeen "$last_seen" '{ok:true,total:0,unread:0,lastSeen:$lastSeen,maxTimestamp:0,notifications:[]}'
+    return
+  fi
+
+  jq -s --arg query "${query,,}" --argjson limit "$limit" --argjson lastSeen "$last_seen" '
+    map(select(type == "object"))
+    | unique_by(._ritechoiceFile)
+    | sort_by((.timestamp | tonumber?) // 0)
+    | reverse
+    | . as $all
+    | ($all | map(select(
+        $query == ""
+        or (((.app // "") + "\n" + (.summary // "") + "\n" + (.body // "")) | ascii_downcase | contains($query))
+      ))) as $matching
+    | {
+        ok: true,
+        total: ($all | length),
+        unread: ([$all[] | select(((.timestamp | tonumber?) // 0) > $lastSeen)] | length),
+        lastSeen: $lastSeen,
+        maxTimestamp: ([$all[] | ((.timestamp | tonumber?) // 0)] | max // 0),
+        notifications: ($matching[:$limit])
+      }
+  ' "${files[@]}"
+}
+
+cmd_list() {
+  with_lock list_locked "" "${1:-$HISTORY_LIMIT}"
+}
+
+cmd_search() {
+  local query="${1:-}" limit="${2:-$HISTORY_LIMIT}"
+  with_lock list_locked "$query" "$limit"
+}
+
+list_locked() {
+  apply_preview_policy
+  notification_result "$1" "$2"
+}
+
+remove_locked() {
+  local name stem
+  for name in "$@"; do
+    valid_name "$name" || return 2
+  done
+  for name in "$@"; do
+    stem="${name%.json}"
+    : > "$DISMISSED_DIR/$name"
+    chmod 600 "$DISMISSED_DIR/$name" 2>/dev/null || true
+    rm -f -- "$ARCHIVE_DIR/$name"
+    remove_media_for_stem "$stem"
+  done
+}
+
+cmd_remove() {
+  (( $# > 0 )) || json_error "remove-needs-notification" 2
+  if ! with_lock remove_locked "$@"; then
+    json_error "invalid-notification" 2
+  fi
+  jq -cn --argjson count "$#" '{ok:true,removed:$count}'
+}
+
+clear_locked() {
+  local source
+  shopt -s nullglob
+  for source in "$SOURCE_DIR"/*.json "$SOURCE_DIR/history"/*.json; do
+    : > "$DISMISSED_DIR/$(basename -- "$source")"
+  done
+  find "$ARCHIVE_DIR" "$IMAGE_DIR" -maxdepth 1 -type f -delete
+  atomic_text "$LAST_SEEN_FILE" "$(date +%s%3N)"
+}
+
+cmd_clear() {
+  omarchy-shell notifications dismissAll >/dev/null 2>&1 || true
+  omarchy-shell notifications clear >/dev/null 2>&1 || true
+  with_lock clear_locked
+  jq -cn '{ok:true,cleared:true}'
+}
+
+cmd_seen() {
+  local requested="${1:-}" current=0
+  if [[ -z "$requested" ]]; then
+    [[ -r "$LAST_SEEN_FILE" ]] && read -r current < "$LAST_SEEN_FILE" || true
+    [[ "$current" =~ ^[0-9]+$ ]] || current=0
+    jq -cn --argjson seen "$current" '{ok:true,seen:$seen}'
+    return
+  fi
+  [[ "$requested" =~ ^[0-9]+$ ]] || json_error "invalid-seen-watermark" 2
+  with_lock mark_seen_locked "$requested"
+}
+
+mark_seen_locked() {
+  local requested="$1" current=0
+  [[ -r "$LAST_SEEN_FILE" ]] && read -r current < "$LAST_SEEN_FILE" || true
+  [[ "$current" =~ ^[0-9]+$ ]] || current=0
+  (( requested > current )) || requested="$current"
+  atomic_text "$LAST_SEEN_FILE" "$requested"
+  jq -cn --argjson seen "$requested" '{ok:true,seen:$seen}'
+}
+
+cmd_unread() {
+  with_lock unread_locked
+}
+
+unread_locked() {
+  local result
+  result="$(notification_result "" "$HISTORY_LIMIT")"
+  jq -c '{ok:true,unread:.unread}' <<< "$result"
+}
+
+cmd_prune() {
+  with_lock prepare_locked
+  jq -cn '{ok:true,pruned:true}'
+}
+
+cmd_sync() {
+  with_lock prepare_locked
+  jq -cn '{ok:true,synced:true}'
+}
+
+cmd_watch() {
+  local event_file status timeout_count=0
+  with_lock prepare_locked
+  jq -cn '{ok:true,event:"ready"}'
+  command -v inotifywait >/dev/null 2>&1 || json_error "inotifywait-not-installed"
+  mkdir -p "$SOURCE_DIR" "$SOURCE_DIR/history"
+  find "$STATE_DIR" -maxdepth 1 -type f -name '.watch.*' -mmin +1 -delete 2>/dev/null || true
+  event_file="$STATE_DIR/.watch.$$"
+  trap 'trap - EXIT HUP INT TERM; rm -f -- "${event_file:-}"; exit 0' EXIT HUP INT TERM
+  while true; do
+    : > "$event_file"
+    inotifywait -q -t 2 -e close_write -e moved_to --format '%w%f' "$SOURCE_DIR" "$SOURCE_DIR/history" > "$event_file" 2>/dev/null
+    status=$?
+    if (( status == 0 )) && [[ -s "$event_file" ]]; then
+      timeout_count=0
+      exec 9>"$LOCK_FILE"
+      flock 9
+      sync_all
+      prune_locked
+      flock -u 9
+      exec 9>&-
+      jq -cn '{ok:true,event:"changed"}'
+    elif (( status == 2 )); then
+      ((timeout_count += 1))
+      if (( timeout_count >= 5 )); then
+        timeout_count=0
+        exec 9>"$LOCK_FILE"
+        flock 9
+        sync_all
+        prune_locked
+        flock -u 9
+        exec 9>&-
+        jq -cn '{ok:true,event:"reconciled"}'
+      fi
+    elif (( status != 2 )); then
+      sleep 2
+    fi
+  done
+}
+
+seed_locked() {
+  local count="$1" now i timestamp name app summary body json
+  now="$(date +%s%3N)"
+  for ((i = 0; i < count; i++)); do
+    # A short future offset keeps a complete synthetic set together at the top
+    # of an existing development archive without deleting real history. The UI
+    # clamps negative ages to "Now", and all entries settle into normal time
+    # within seconds.
+    timestamp=$((now + count * 1000 - i * 1000))
+    name="seed-${timestamp}-${i}.json"
+    case $((i % 6)) in
+      0) app="Slack"; summary="#design from Mara"; body="The new empty state is ready for review." ;;
+      1) app="Signal"; summary="Jules"; body="Are we still on for Thursday?" ;;
+      2) app="Chromium"; summary="Calendar"; body="Standup starts in 10 minutes." ;;
+      3) app="Spotify"; summary="Now playing"; body="Life's What You Make It — Talk Talk" ;;
+      4) app="Omarchy"; summary="Update available"; body="System packages are ready to install." ;;
+      *) app="Thunderbird"; summary="Invoice paid"; body="Nova Systems completed payment." ;;
+    esac
+    json="$(jq -cn --arg file "$name" --arg app "$app" --arg summary "$summary" --arg body "$body" --argjson timestamp "$timestamp" '{id:0,originalId:0,app:$app,appIcon:"",summary:$summary,body:$body,image:"",preview:"",glyph:"",urgency:1,timestamp:$timestamp,_ritechoiceFile:$file}')"
+    atomic_text "$ARCHIVE_DIR/$name" "$json"
+  done
+  prune_locked
+}
+
+cmd_seed() {
+  local count="${1:-25}"
+  [[ "$count" =~ ^[0-9]+$ ]] || json_error "invalid-seed-count" 2
+  (( count >= 1 && count <= 5000 )) || json_error "invalid-seed-count" 2
+  with_lock seed_locked "$count"
+  jq -cn --argjson seeded "$count" '{ok:true,seeded:$seeded}'
+}
+
+usage() {
+  cat <<'EOF'
+Usage: notification-center COMMAND [ARGS]
+
+Commands:
+  watch                    archive notifications and stream new entries
+  sync                     ingest available source notifications
+  list [LIMIT]             list newest notifications as JSON
+  search QUERY [LIMIT]     search app, title, and body text
+  remove FILE [FILE...]    remove archived notifications
+  clear                    clear the archive and current Omarchy notifications
+  seen [TIMESTAMP]         read or advance the seen watermark
+  unread                   return the unread count
+  prune                    apply age/count retention and media cleanup
+  seed [COUNT]             add synthetic development notifications
+EOF
+}
+
+ensure_state || json_error "state-directory-unavailable"
+
+case "${1:-}" in
+  watch) shift; cmd_watch "$@" ;;
+  sync) shift; cmd_sync "$@" ;;
+  list) shift; cmd_list "$@" ;;
+  search) shift; cmd_search "$@" ;;
+  remove) shift; cmd_remove "$@" ;;
+  clear) shift; cmd_clear "$@" ;;
+  seen) shift; cmd_seen "$@" ;;
+  unread) shift; cmd_unread "$@" ;;
+  prune) shift; cmd_prune "$@" ;;
+  seed) shift; cmd_seed "$@" ;;
+  -h|--help|help|"") usage ;;
+  *) json_error "unknown-command" 2 ;;
+esac
